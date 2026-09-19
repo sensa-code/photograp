@@ -4,6 +4,10 @@ import { blendSurface } from './blend';
 import { applyAdjustment } from '../filters/adjustments';
 import { rgbCss } from './color';
 import { maskAlpha } from './mask';
+import { opaqueBounds } from './surface';
+import { renderGradient } from './gradient-render';
+import { resolveStops, sortStops } from './gradients';
+import { cachedPatternSurface, embeddedPattern, tileInto } from './patterns';
 
 export interface CompositeOptions {
   width: number;
@@ -17,6 +21,54 @@ export interface CompositeOptions {
   overrideIsMask?: boolean;
   /** Ignore layer visibility flags and render only this layer (isolate mode). */
   soloLayerId?: string | null;
+}
+
+/**
+ * Paint the overlay fill for a layer, already clipped to its silhouette.
+ * A pattern that has not finished decoding yet simply does not draw, which
+ * is a frame of nothing rather than a wrong colour.
+ */
+function overlayFill(layer: Layer, src: Surface, opt: CompositeOptions): Surface | null {
+  const o = layer.effects.overlay;
+  const fill = createSurface(opt.width, opt.height);
+
+  if (o.kind === 'gradient') {
+    const stops = resolveStops(sortStops(o.stops), o.color, { r: 255, g: 255, b: 255 });
+    // The gradient runs across the layer's own bounds, so it looks the same
+    // wherever the layer sits on the canvas. `src` rather than layer.surface,
+    // because a live preview replaces the pixels the user is looking at.
+    const b = opaqueBounds(src) ?? { x: 0, y: 0, w: opt.width, h: opt.height };
+    const cx = b.x + layer.x + b.w / 2, cy = b.y + layer.y + b.h / 2;
+    const rad = (o.angle * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    // Project the bounds onto the chosen direction, so the ramp spans exactly
+    // the layer in that direction rather than always its longest side.
+    const reach = (Math.abs(cos) * b.w + Math.abs(sin) * b.h) / 2 || 1;
+    // Only a plain linear ramp has two ends. Radial, angle and diamond read
+    // their first point as a centre, and a reflected ramp mirrors about it,
+    // so all four start from the middle of the layer.
+    const centred = o.gradientKind !== 'linear';
+    renderGradient(
+      fill, o.gradientKind,
+      centred ? cx : cx - cos * reach,
+      centred ? cy : cy - sin * reach,
+      cx + cos * reach, cy + sin * reach,
+      stops, false, false,
+    );
+  } else if (o.kind === 'pattern') {
+    const pattern = embeddedPattern(o);
+    const tile = pattern ? cachedPatternSurface(pattern) : null;
+    if (!tile) return null;
+    tileInto(fill, tile, o.scale);
+  } else {
+    fill.ctx.fillStyle = rgbCss(o.color);
+    fill.ctx.fillRect(0, 0, fill.w, fill.h);
+  }
+
+  // No clipping here: the caller draws with source-atop, which already
+  // limits the fill to the layer. Clipping as well would apply the layer's
+  // alpha twice and leave a semi-transparent layer only half covered.
+  return fill;
 }
 
 /** Render a single layer's pixels into a document-sized surface. */
@@ -78,6 +130,19 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
   }
 
   drawContent(out.ctx);
+
+  if (e.overlay.enabled && e.overlay.alpha > 0) {
+    const fill = overlayFill(layer, src, opt);
+    if (fill) {
+      out.ctx.save();
+      // source-atop keeps the destination alpha, so a semi-transparent layer does
+      // not become more opaque just because an overlay was switched on.
+      out.ctx.globalCompositeOperation = 'source-atop';
+      out.ctx.globalAlpha = e.overlay.alpha;
+      out.ctx.drawImage(fill.canvas, 0, 0);
+      out.ctx.restore();
+    }
+  }
 
   if (mask && layer.maskEnabled) {
     out.ctx.save();

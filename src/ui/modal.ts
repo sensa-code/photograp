@@ -21,6 +21,9 @@ export interface ModalOptions {
 let openCount = 0;
 export const modalOpen = (): boolean => openCount > 0;
 
+/** Stack of open modals; only the last one may answer Escape and Enter. */
+const stack: object[] = [];
+
 export function openModal(opts: ModalOptions): Promise<string | null> {
   return new Promise((resolve) => {
     openCount++;
@@ -42,8 +45,13 @@ export function openModal(opts: ModalOptions): Promise<string | null> {
     );
     const backdrop = el('div', { class: 'modal-backdrop' }, modal);
 
+    const token = {};
+    stack.push(token);
+
     const finish = (value: string | null): void => {
       openCount--;
+      const at = stack.indexOf(token);
+      if (at >= 0) stack.splice(at, 1);
       backdrop.remove();
       document.removeEventListener('keydown', onKey, true);
       opts.onClose?.();
@@ -59,6 +67,9 @@ export function openModal(opts: ModalOptions): Promise<string | null> {
     on(backdrop, 'pointerdown', (ev) => { if (ev.target === backdrop) finish(null); });
 
     const onKey = (ev: KeyboardEvent): void => {
+      // A nested prompt sits on top; keys belong to it alone, or one Escape
+      // would dismiss the dialog underneath as well.
+      if (stack[stack.length - 1] !== token) return;
       if (ev.key === 'Escape') { ev.stopPropagation(); finish(null); }
       if (ev.key === 'Enter' && !(ev.target instanceof HTMLTextAreaElement)) {
         ev.stopPropagation();

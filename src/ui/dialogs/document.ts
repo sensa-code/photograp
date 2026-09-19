@@ -4,10 +4,17 @@ import { createSurface } from '../../core/surface';
 import { rgbCss, type RGB } from '../../core/color';
 import { clamp } from '../../core/geometry';
 import { exportDocument, type ExportFormat } from '../../io/files';
-import { loadPatterns, patternSurface, tileInto } from '../../core/patterns';
+import {
+  loadPatterns, patternSurface, tileInto, warmEmbedded,
+} from '../../core/patterns';
+import { cloneStops, loadGradients } from '../../core/gradients';
+import { defaultEffects } from '../../core/layer';
+import {
+  cloneEffects, createStyle, describeStyle, loadStyles, saveStyles,
+} from '../../core/styles';
 import { el, on } from '../dom';
 import {
-  checkboxControl, colorChip, formGrid, numberControl, openModal,
+  checkboxControl, colorChip, formGrid, numberControl, openModal, rebuild,
   segmentedControl, selectControl, sliderControl,
 } from '../modal';
 
@@ -460,7 +467,9 @@ export async function layerStyleDialog(app: App): Promise<void> {
       checkboxControl(title, enabled, (v) => { set(v); apply(); }),
       rows);
 
-  const body = el('div', { style: 'display:grid;gap:10px;min-width:360px' },
+  const body = el('div', { style: 'display:grid;gap:10px;min-width:380px' });
+  const rebuildBody = (): void => { rebuild(body, [...sections()]); };
+  const sections = (): HTMLElement[] => [
     section('陰影', e.dropShadow.enabled, (v) => { e.dropShadow.enabled = v; }, formGrid([
       ['顏色', colorChip(e.dropShadow.color, (c) => { e.dropShadow.color = c; apply(); })],
       ['不透明度', sliderControl(e.dropShadow.alpha * 100, 0, 100, 1, (v) => { e.dropShadow.alpha = v / 100; apply(); }, '%', 130)],
@@ -477,9 +486,132 @@ export async function layerStyleDialog(app: App): Promise<void> {
       ['顏色', colorChip(e.stroke.color, (c) => { e.stroke.color = c; apply(); })],
       ['不透明度', sliderControl(e.stroke.alpha * 100, 0, 100, 1, (v) => { e.stroke.alpha = v / 100; apply(); }, '%', 130)],
       ['寬度', sliderControl(e.stroke.width, 0, 40, 1, (v) => { e.stroke.width = v; apply(); }, ' px', 130)],
-    ])));
+    ])),
+    section('覆蓋', e.overlay.enabled, (v) => { e.overlay.enabled = v; }, overlayRows()),
+    styleRow(),
+  ];
+
+  // ---- overlay ----
+  const gradients = loadGradients();
+  const patterns = loadPatterns();
+
+  const overlayRows = (): HTMLElement => {
+    const rows = el('div', { style: 'display:grid;gap:8px' });
+    const build = (): void => {
+      const common: [string | null, HTMLElement | string][] = [
+        ['種類', segmentedControl(e.overlay.kind, [
+          { value: 'color', label: '顏色' },
+          { value: 'gradient', label: '漸層' },
+          { value: 'pattern', label: '圖樣' },
+        ], (v) => {
+          e.overlay.kind = v as typeof e.overlay.kind;
+          apply();
+          build();
+        })],
+        ['不透明度', sliderControl(e.overlay.alpha * 100, 0, 100, 1, (v) => {
+          e.overlay.alpha = v / 100; apply();
+        }, '%', 130)],
+      ];
+      if (e.overlay.kind === 'color') {
+        common.push(['顏色', colorChip(e.overlay.color, (c) => { e.overlay.color = c; apply(); })]);
+      } else if (e.overlay.kind === 'gradient') {
+        // Picking copies the stops onto the effect: a project has to keep
+        // looking the same on a machine without this gradient library.
+        common.push(['漸層', selectControl('',
+          [{ value: '', label: '（目前的漸層）' },
+            ...gradients.map((g) => ({ value: g.id, label: g.name }))],
+          (v) => {
+            const g = gradients.find((x) => x.id === v);
+            if (!g) return;
+            e.overlay.stops = cloneStops(g.stops);
+            apply();
+          })]);
+        common.push(['樣式', selectControl(e.overlay.gradientKind, [
+          { value: 'linear', label: '線性' },
+          { value: 'radial', label: '放射狀' },
+          { value: 'angle', label: '角度' },
+          { value: 'reflected', label: '反射' },
+          { value: 'diamond', label: '菱形' },
+        ], (v) => { e.overlay.gradientKind = v as typeof e.overlay.gradientKind; apply(); })]);
+        common.push(['角度', sliderControl(e.overlay.angle, -180, 180, 1, (v) => {
+          e.overlay.angle = v; apply();
+        }, '°', 130)]);
+        common.push([null, el('div', {
+          class: 'hint', text: '前景色色標會改用上方的覆蓋顏色。',
+        })]);
+      } else {
+        common.push(['圖樣', selectControl(e.overlay.patternId,
+          patterns.map((p) => ({ value: p.id, label: p.name })),
+          (v) => {
+            const p = patterns.find((x) => x.id === v);
+            if (!p) return;
+            // A built-in is code, so its id is enough; a user tile has to
+            // travel with the effect.
+            e.overlay.patternId = p.builtin ? p.id : '';
+            e.overlay.patternData = p.builtin ? '' : p.data;
+            e.overlay.patternWidth = p.builtin ? 0 : p.width;
+            e.overlay.patternHeight = p.builtin ? 0 : p.height;
+            void warmEmbedded([e.overlay]).then(apply);
+            apply();
+          })]);
+        common.push(['縮放', sliderControl(e.overlay.scale, 10, 400, 5, (v) => {
+          e.overlay.scale = v; apply();
+        }, '%', 130)]);
+      }
+      rebuild(rows, [formGrid(common)]);
+    };
+    build();
+    return rows;
+  };
+
+  // ---- saved styles ----
+  let styles = loadStyles();
+
+  const styleRow = (): HTMLElement => {
+    const row = el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap' });
+    const build = (): void => {
+      const pick = selectControl('', [
+        { value: '', label: '套用已存樣式…' },
+        ...styles.map((s) => ({ value: s.id, label: s.name })),
+      ], (v) => {
+        const chosen = styles.find((s) => s.id === v);
+        if (!chosen) return;
+        Object.assign(e, cloneEffects(chosen.effects));
+        // A style can carry its own pattern tile, which has to decode first.
+        void warmEmbedded([e.overlay]).then(apply);
+        apply();
+        rebuildBody();
+      });
+      const save = el('button', { class: 'btn', text: '存成樣式' });
+      on(save, 'click', () => {
+        const input = el('input', {
+          type: 'text', value: `樣式 ${styles.length + 1}`,
+        }) as HTMLInputElement;
+        // Keystrokes must stay in this prompt; the style dialog behind it
+        // would otherwise see Escape and close them both.
+        on(input, 'keydown', (ev) => { ev.stopPropagation(); });
+        void openModal({ title: '存成樣式', body: input, width: 320 }).then((r) => {
+          if (r !== 'ok') return;
+          styles = [...styles, createStyle(input.value.trim(), e)];
+          saveStyles(styles);
+          app.status(`已存成樣式「${styles[styles.length - 1].name}」`);
+          build();
+        });
+      });
+      const clear = el('button', { class: 'btn', text: '清除效果' });
+      on(clear, 'click', () => {
+        Object.assign(e, defaultEffects());
+        apply();
+        rebuildBody();
+      });
+      rebuild(row, [pick, save, clear, el('div', { class: 'hint', text: describeStyle(e) })]);
+    };
+    build();
+    return row;
+  };
 
   const before = JSON.parse(JSON.stringify(layer.effects)) as typeof layer.effects;
+  rebuildBody();
   const res = await openModal({ title: '圖層樣式', body });
   if (res === 'ok') {
     apply();

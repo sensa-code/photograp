@@ -11,6 +11,16 @@ export function defaultEffects(): LayerEffects {
     dropShadow: { enabled: false, color: { r: 0, g: 0, b: 0 }, alpha: 0.6, blur: 8, dx: 4, dy: 4 },
     stroke: { enabled: false, color: { r: 0, g: 0, b: 0 }, alpha: 1, width: 2 },
     glow: { enabled: false, color: { r: 255, g: 235, b: 140 }, alpha: 0.7, blur: 12 },
+    overlay: {
+      enabled: false, kind: 'color', alpha: 1, color: { r: 220, g: 60, b: 60 },
+      stops: [
+        { pos: 0, color: { r: 0, g: 0, b: 0 }, alpha: 1, ref: 'fg' },
+        { pos: 1, color: { r: 255, g: 255, b: 255 }, alpha: 1, ref: 'bg' },
+      ],
+      gradientKind: 'linear', angle: 90,
+      patternId: 'checker', patternData: '', patternWidth: 0, patternHeight: 0,
+      scale: 100,
+    },
   };
 }
 
@@ -56,6 +66,11 @@ export function shallowCopyLayer(l: Layer): Layer {
       dropShadow: { ...l.effects.dropShadow, color: { ...l.effects.dropShadow.color } },
       stroke: { ...l.effects.stroke, color: { ...l.effects.stroke.color } },
       glow: { ...l.effects.glow, color: { ...l.effects.glow.color } },
+      overlay: {
+        ...l.effects.overlay,
+        color: { ...l.effects.overlay.color },
+        stops: l.effects.overlay.stops.map((s) => ({ ...s, color: { ...s.color } })),
+      },
     },
     text: l.text ? { ...l.text, color: { ...l.text.color }, strokeColor: { ...l.text.strokeColor } } : undefined,
     adjustment: l.adjustment ? structuredCloneSpec(l.adjustment) : undefined,

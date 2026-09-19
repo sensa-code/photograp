@@ -272,5 +272,41 @@ export function tileInto(
   target.ctx.restore();
 }
 
+/**
+ * A pattern record for whatever an overlay effect is carrying: either a
+ * built-in by id, or the tile embedded in the effect itself. Embedded tiles
+ * are keyed by their own data so the cache still works.
+ */
+export function embeddedPattern(o: {
+  patternId: string; patternData: string; patternWidth: number; patternHeight: number;
+}): Pattern | null {
+  if (o.patternData && o.patternWidth > 0 && o.patternHeight > 0) {
+    return {
+      id: `emb:${o.patternData.length}:${o.patternData.slice(-32)}`,
+      name: '嵌入圖樣',
+      width: o.patternWidth,
+      height: o.patternHeight,
+      data: o.patternData,
+    };
+  }
+  return BUILTIN_PATTERNS.find((p) => p.id === o.patternId) ?? null;
+}
+
+/**
+ * Decode the tiles that arrived embedded in layer effects — from a project
+ * file, or from a style the user just applied. Resolves once they are all in
+ * the cache, so the caller can redraw with the pattern actually showing.
+ */
+export function warmEmbedded(
+  list: { patternData: string; patternWidth: number; patternHeight: number; patternId: string }[],
+): Promise<void> {
+  const jobs: Promise<unknown>[] = [];
+  for (const o of list) {
+    const p = embeddedPattern(o);
+    if (p && !cache.has(p.id)) jobs.push(patternSurface(p).catch(() => { /* skip broken */ }));
+  }
+  return Promise.all(jobs).then(() => undefined);
+}
+
 /** Short readout for the picker. */
 export const describePattern = (p: Pattern): string => `${p.width} × ${p.height} px`;

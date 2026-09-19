@@ -156,10 +156,37 @@ export interface SmartObject {
   filters: SmartFilterEntry[];
 }
 
+/**
+ * Colour, gradient and pattern overlay share one slot with a `kind` switch.
+ * Photoshop keeps them as three stackable effects; one slot covers the same
+ * ground with a fraction of the interface.
+ */
+export interface OverlayEffect {
+  enabled: boolean;
+  kind: 'color' | 'gradient' | 'pattern';
+  alpha: number;
+  color: RGB;
+  /**
+   * The gradient and pattern are stored on the effect itself, not as ids into
+   * the local library: a project or a saved style has to keep working on
+   * another machine, where that library does not exist.
+   */
+  stops: GradientStop[];
+  gradientKind: 'linear' | 'radial' | 'angle' | 'reflected' | 'diamond';
+  angle: number;
+  /** A built-in pattern's id, or '' when `patternData` holds a custom tile. */
+  patternId: string;
+  patternData: string;
+  patternWidth: number;
+  patternHeight: number;
+  scale: number;
+}
+
 export interface LayerEffects {
   dropShadow: { enabled: boolean; color: RGB; alpha: number; blur: number; dx: number; dy: number };
   stroke: { enabled: boolean; color: RGB; alpha: number; width: number };
   glow: { enabled: boolean; color: RGB; alpha: number; blur: number };
+  overlay: OverlayEffect;
 }
 
 export interface Layer {

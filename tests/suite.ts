@@ -7,15 +7,22 @@ import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
 import type { Rect } from '../src/core/geometry';
 import {
-  BUILTIN_PATTERNS, cachedPatternSurface, createPattern, describePattern, forgetPattern,
-  loadPatterns, MAX_PATTERN, patternSurface, resetPatterns, savePatterns, tileInto,
+  BUILTIN_PATTERNS, cachedPatternSurface, createPattern, describePattern, embeddedPattern,
+  forgetPattern, loadPatterns, MAX_PATTERN, patternSurface, resetPatterns, savePatterns,
+  tileInto, warmEmbedded,
 } from '../src/core/patterns';
 import {
   defaultRefine, refineIsIdentity, refineMask, scaleMask,
 } from '../src/core/refine';
 import type { Layer } from '../src/core/types';
 import { compositeLayers } from '../src/core/compositor';
-import { createAdjustmentLayer, createRasterLayer, duplicateLayer } from '../src/core/layer';
+import {
+  createAdjustmentLayer, createRasterLayer, defaultEffects, duplicateLayer,
+} from '../src/core/layer';
+import {
+  BUILTIN_STYLES, cloneEffects, createStyle, describeStyle, loadStyles,
+  resetStyles, saveStyles,
+} from '../src/core/styles';
 import { maskAlpha, maskFromCoverage, coverageFromMask } from '../src/core/mask';
 import { PhotoDoc } from '../src/core/document';
 import {
@@ -1487,6 +1494,285 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- overlay effects and saved styles ----
+  group('覆蓋效果');
+  /** A layer holding one opaque square, so the silhouette is easy to check. */
+  const squareLayer = (size = 40, box = 20): ReturnType<typeof createRasterLayer> => {
+    const l = createRasterLayer('方塊', size, size);
+    l.surface!.ctx.fillStyle = '#000000';
+    l.surface!.ctx.fillRect(10, 10, box, box);
+    return l;
+  };
+
+  await test('預設不啟用覆蓋', () => {
+    const e = defaultEffects();
+    assert(!e.overlay.enabled, '預設應關閉');
+    assert(e.overlay.kind === 'color', '預設種類應是顏色');
+    const l = squareLayer();
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    assert(pixel(out, 20, 20)[0] === 0, '未啟用時應維持原色');
+  });
+  await test('顏色覆蓋只蓋在圖層內容上', () => {
+    const l = squareLayer();
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.kind = 'color';
+    l.effects.overlay.color = { r: 255, g: 0, b: 0 };
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    const inside = pixel(out, 20, 20);
+    assert(inside[0] > 200 && inside[1] < 60, `內容應被蓋成紅的，實得 ${inside}`);
+    assert(pixel(out, 2, 2)[3] === 0, '圖層外應仍然透明');
+  });
+  await test('覆蓋不透明度會與原色混合', () => {
+    const l = squareLayer();
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.color = { r: 255, g: 255, b: 255 };
+    l.effects.overlay.alpha = 0.5;
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    const mid = pixel(out, 20, 20);
+    assert(mid[0] > 100 && mid[0] < 180, `半透明白蓋在黑上應是灰的，實得 ${mid}`);
+  });
+  await test('圖樣覆蓋會鋪在內容上', () => {
+    const l = squareLayer(48, 28);
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.kind = 'pattern';
+    l.effects.overlay.patternId = 'bricks';
+    const out = compositeLayers([l], { width: 48, height: 48 });
+    const inside = pixel(out, 20, 20);
+    assert(inside[0] > inside[2], `磚牆是暖色的，實得 ${inside}`);
+    assert(pixel(out, 2, 2)[3] === 0, '圖層外應仍然透明');
+  });
+  await test('找不到的圖樣不會畫錯顏色', () => {
+    const l = squareLayer();
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.kind = 'pattern';
+    l.effects.overlay.patternId = '沒這個';
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    assert(pixel(out, 20, 20)[0] === 0, '應保持原色而不是蓋上預設色');
+  });
+  await test('漸層覆蓋會形成漸變', () => {
+    const l = createRasterLayer('帶', 60, 20);
+    l.surface!.ctx.fillStyle = '#000000';
+    l.surface!.ctx.fillRect(0, 0, 60, 20);
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.kind = 'gradient';
+    l.effects.overlay.stops = [
+      { pos: 0, color: { r: 0, g: 0, b: 0 }, alpha: 1 },
+      { pos: 1, color: { r: 255, g: 255, b: 255 }, alpha: 1 },
+    ];
+    l.effects.overlay.angle = 0;
+    const out = compositeLayers([l], { width: 60, height: 20 });
+    const left = pixel(out, 2, 10)[0];
+    const right = pixel(out, 57, 10)[0];
+    assert(Math.abs(right - left) > 100, `兩端應差很多，實得 ${left} vs ${right}`);
+  });
+  await test('覆蓋在遮色片之前套用', () => {
+    const l = squareLayer();
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.color = { r: 255, g: 0, b: 0 };
+    l.mask = createSurface(40, 40);
+    l.mask.ctx.fillStyle = '#000';
+    l.mask.ctx.fillRect(0, 0, 40, 40);
+    l.mask.ctx.fillStyle = '#fff';
+    l.mask.ctx.fillRect(0, 0, 20, 40);
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    assert(pixel(out, 15, 20)[0] > 200, '遮色片白的那半應看得到覆蓋');
+    assert(pixel(out, 25, 20)[3] === 0, '遮色片黑的那半應被遮掉');
+  });
+  await test('複製圖層不會共用覆蓋設定', () => {
+    const l = squareLayer();
+    l.effects.overlay.color = { r: 1, g: 2, b: 3 };
+    const copy = duplicateLayer(l);
+    copy.effects.overlay.color.r = 200;
+    copy.effects.overlay.enabled = true;
+    assert(l.effects.overlay.color.r === 1, '原圖層的顏色不應被改');
+    assert(!l.effects.overlay.enabled, '原圖層的開關不應被改');
+  });
+  await test('舊專案檔沒有覆蓋欄位也能載入', async () => {
+    const doc = PhotoDoc.createBlank('old-file', 20, 20, 'white');
+    const json = JSON.parse(serializeDocument(doc)) as {
+      layers: { effects: Record<string, unknown> }[];
+    };
+    // Strip the field the way a file saved before this version would be.
+    for (const l of json.layers) delete l.effects.overlay;
+    const back = await loadProject(JSON.stringify(json));
+    assert(back.layers[0].effects.overlay, '應補上預設的覆蓋設定');
+    assert(!back.layers[0].effects.overlay.enabled, '補上的應是關閉的');
+    const out = back.render();
+    assert(out.w === 20, '載入後應能正常合成');
+  });
+
+  await test('覆蓋不會讓半透明的圖層變不透明', () => {
+    const l = createRasterLayer('半透', 40, 40);
+    l.surface!.ctx.globalAlpha = 0.5;
+    l.surface!.ctx.fillStyle = '#000000';
+    l.surface!.ctx.fillRect(10, 10, 20, 20);
+    const before = pixel(compositeLayers([l], { width: 40, height: 40 }), 20, 20)[3];
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.color = { r: 255, g: 0, b: 0 };
+    const after = pixel(compositeLayers([l], { width: 40, height: 40 }), 20, 20)[3];
+    near(after, before, 2, `不透明度應不變，實得 ${before} → ${after}`);
+    assert(before > 100 && before < 160, `來源本來就是半透明，實得 ${before}`);
+  });
+  await test('放射狀覆蓋以圖層中心為圓心', () => {
+    const l = createRasterLayer('帶', 60, 60);
+    l.surface!.ctx.fillStyle = '#000000';
+    l.surface!.ctx.fillRect(0, 0, 60, 60);
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.kind = 'gradient';
+    l.effects.overlay.gradientKind = 'radial';
+    l.effects.overlay.stops = [
+      { pos: 0, color: { r: 255, g: 255, b: 255 }, alpha: 1 },
+      { pos: 1, color: { r: 0, g: 0, b: 0 }, alpha: 1 },
+    ];
+    const out = compositeLayers([l], { width: 60, height: 60 });
+    const centre = pixel(out, 30, 30)[0];
+    const corner = pixel(out, 2, 2)[0];
+    assert(centre > 200, `中心應最亮，實得 ${centre}`);
+    assert(corner < 120, `邊緣應變暗，實得 ${corner}`);
+  });
+  await test('嵌入的圖樣不需要本機圖樣庫', async () => {
+    const src = createSurface(8, 8);
+    src.ctx.fillStyle = '#20c020';
+    src.ctx.fillRect(0, 0, 8, 8);
+    const p = createPattern('離線磁磚', src);
+    const l = createRasterLayer('方塊', 40, 40);
+    l.surface!.ctx.fillStyle = '#000000';
+    l.surface!.ctx.fillRect(10, 10, 20, 20);
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.kind = 'pattern';
+    // Nothing is saved to the library; the effect carries the tile itself.
+    l.effects.overlay.patternId = '';
+    l.effects.overlay.patternData = p.data;
+    l.effects.overlay.patternWidth = p.width;
+    l.effects.overlay.patternHeight = p.height;
+    const embedded = embeddedPattern(l.effects.overlay)!;
+    assert(embedded, '應能從效果重建圖樣');
+    await patternSurface(embedded);
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    const inside = pixel(out, 20, 20);
+    assert(inside[1] > 150 && inside[0] < 100, `應蓋上綠色磁磚，實得 ${inside}`);
+    assert(!loadPatterns().some((x) => x.name === '離線磁磚'), '不應寫進圖樣庫');
+  });
+  await test('樣式帶著自己的漸層而不是一個 id', () => {
+    const sunset = BUILTIN_STYLES.find((s2) => s2.id === 'sunset-fill')!;
+    assert(sunset.effects.overlay.stops.length >= 2, '樣式應存著色標本身');
+    assert(!('gradientId' in sunset.effects.overlay), '不應再依賴漸層 id');
+  });
+
+  await test('覆蓋會完全蓋過半透明的內容', () => {
+    // source-atop already clips to the layer; clipping the fill as well would
+    // apply the layer's alpha twice and leave the overlay half strength.
+    const l = createRasterLayer('半透', 40, 40);
+    l.surface!.ctx.globalAlpha = 0.5;
+    l.surface!.ctx.fillStyle = '#000000';
+    l.surface!.ctx.fillRect(10, 10, 20, 20);
+    l.effects.overlay.enabled = true;
+    l.effects.overlay.color = { r: 255, g: 0, b: 0 };
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    const px = pixel(out, 20, 20);
+    // Over the white page the half-opaque red reads as a pink, not a dull grey-red.
+    assert(px[0] > 200 && px[1] < 90, `覆蓋應是滿強度的紅，實得 ${px}`);
+  });
+  await test('嵌入的圖樣可以隨專案檔一起走', async () => {
+    const doc = PhotoDoc.createBlank('overlay-io', 40, 40, 'white');
+    const src = createSurface(8, 8);
+    src.ctx.fillStyle = '#1560d0';
+    src.ctx.fillRect(0, 0, 8, 8);
+    const tile = createPattern('隨檔磁磚', src);
+    const layer = createRasterLayer('方塊', 40, 40);
+    layer.surface!.ctx.fillStyle = '#000000';
+    layer.surface!.ctx.fillRect(10, 10, 20, 20);
+    layer.effects.overlay.enabled = true;
+    layer.effects.overlay.kind = 'pattern';
+    layer.effects.overlay.patternId = '';
+    layer.effects.overlay.patternData = tile.data;
+    layer.effects.overlay.patternWidth = tile.width;
+    layer.effects.overlay.patternHeight = tile.height;
+    doc.layers.push(layer);
+
+    const back = await loadProject(serializeDocument(doc));
+    const restored = back.layers[back.layers.length - 1];
+    assert(restored.effects.overlay.patternData.length > 0, '磁磚應隨檔存下來');
+    // loadProject decodes embedded tiles, so the first composite already shows it.
+    const out = back.render();
+    const px = pixel(out, 20, 20);
+    assert(px[2] > 150 && px[0] < 90, `載入後第一次合成就應看得到圖樣，實得 ${px}`);
+  });
+  await test('warmEmbedded 會等磁磚解碼完', async () => {
+    const src = createSurface(6, 6);
+    src.ctx.fillStyle = '#ff00ff';
+    src.ctx.fillRect(0, 0, 6, 6);
+    const tile = createPattern('等待', src);
+    const overlay = {
+      patternId: '', patternData: tile.data,
+      patternWidth: tile.width, patternHeight: tile.height,
+    };
+    forgetPattern(embeddedPattern(overlay)!.id);
+    assert(cachedPatternSurface(embeddedPattern(overlay)!) === null, '先確定沒快取');
+    await warmEmbedded([overlay]);
+    assert(cachedPatternSurface(embeddedPattern(overlay)!), 'warmEmbedded 後應已在快取中');
+  });
+
+  group('圖層樣式預設');
+  await test('內建樣式都至少啟用一種效果', () => {
+    assert(BUILTIN_STYLES.length >= 6, '內建樣式數量');
+    for (const s2 of BUILTIN_STYLES) {
+      const e = s2.effects;
+      const any = e.dropShadow.enabled || e.glow.enabled || e.stroke.enabled || e.overlay.enabled;
+      assert(any, `${s2.name} 應至少啟用一種效果`);
+      assert(s2.builtin === true, `${s2.name} 應標記為內建`);
+    }
+  });
+  await test('樣式描述列出啟用的效果', () => {
+    const e = defaultEffects();
+    assert(describeStyle(e).includes('沒有'), '全關時應說沒有');
+    e.dropShadow.enabled = true;
+    e.overlay.enabled = true;
+    e.overlay.kind = 'pattern';
+    const text = describeStyle(e);
+    assert(text.includes('陰影') && text.includes('圖樣覆蓋'), `描述不完整：${text}`);
+  });
+  await test('cloneEffects 是深拷貝', () => {
+    const e = defaultEffects();
+    const copy = cloneEffects(e);
+    copy.dropShadow.color.r = 99;
+    copy.overlay.scale = 400;
+    assert(e.dropShadow.color.r === 0, '不應影響原本');
+    assert(e.overlay.scale === 100, '不應影響原本');
+  });
+  await test('自訂樣式可以存起來再載入', () => {
+    resetStyles();
+    const e = defaultEffects();
+    e.glow.enabled = true;
+    e.glow.blur = 33;
+    saveStyles([...loadStyles(), createStyle('測試樣式', e)]);
+    const back = loadStyles().find((s2) => s2.name === '測試樣式')!;
+    assert(back, '應載得回來');
+    assert(back.builtin !== true, '自訂樣式不是內建');
+    near(back.effects.glow.blur, 33, 0.001, '參數應一致');
+    assert(loadStyles().filter((s2) => s2.builtin).length === BUILTIN_STYLES.length, '內建樣式應仍在');
+    resetStyles();
+    assert(!loadStyles().some((s2) => s2.name === '測試樣式'), '恢復後應清掉自訂的');
+  });
+  await test('舊樣式沒有新欄位也能載入', () => {
+    localStorage.setItem('photograp.styles.v1', JSON.stringify({
+      user: [{ id: 'x', name: '舊樣式', effects: { dropShadow: { enabled: true, color: { r: 0, g: 0, b: 0 }, alpha: 1, blur: 4, dx: 0, dy: 0 } } }],
+    }));
+    const back = loadStyles().find((s2) => s2.name === '舊樣式')!;
+    assert(back, '應載得回來');
+    assert(back.effects.overlay && !back.effects.overlay.enabled, '缺的欄位應補上預設');
+    assert(back.effects.dropShadow.enabled, '原有的欄位應保留');
+    resetStyles();
+  });
+  await test('套用樣式後合成會跟著改變', () => {
+    const l = squareLayer();
+    const sunset = BUILTIN_STYLES.find((s2) => s2.id === 'sunset-fill')!;
+    l.effects = cloneEffects(sunset.effects);
+    const out = compositeLayers([l], { width: 40, height: 40 });
+    const inside = pixel(out, 20, 20);
+    assert(inside[0] > 60, `日落漸層應讓方塊不再是純黑，實得 ${inside}`);
   });
 
   // ---- patterns ----

@@ -7,6 +7,7 @@ import { clonePath, type VectorPath } from '../core/path';
 import type { AlphaChannel } from '../core/channels';
 import { renderSmartLayer } from '../core/smart';
 import { renderTextLayer } from '../core/text';
+import { warmEmbedded } from '../core/patterns';
 import { renderShapeLayer } from '../core/shape';
 import type { QuickMask } from '../core/quickmask';
 import type { Guide } from '../core/guides';
@@ -286,7 +287,8 @@ async function deserializeLayer(s: SerializedLayer, w: number, h: number): Promi
     mask: await decode(s.mask),
     text: s.text,
     adjustment: s.adjustment,
-    effects: s.effects ?? defaultEffects(),
+    // Merge so a project saved before an effect existed still loads.
+    effects: { ...defaultEffects(), ...(s.effects ?? {}) },
     expanded: s.expanded ?? true,
     children,
     smart,
@@ -322,6 +324,10 @@ export async function loadProject(text: string): Promise<PhotoDoc> {
     };
     doc.quickMask = qm;
   }
+  // An overlay can carry its own pattern tile; decode those before the first
+  // composite, or the effect would quietly draw nothing.
+  await warmEmbedded(doc.allLayers().map((l) => l.effects.overlay));
+
   // Generated pixels are not stored; rebuild them from the saved data.
   for (const l of doc.allLayers()) {
     if (l.kind === 'smart' && l.smart) renderSmartLayer(l, doc.width, doc.height);
