@@ -1,4 +1,4 @@
-import { uid } from './layer';
+import { uid } from './ids';
 import type { Point } from './geometry';
 
 /**

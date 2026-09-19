@@ -1,9 +1,11 @@
 import type { App } from '../core/app';
+import { PhotoDoc } from '../core/document';
 import type { Layer } from '../core/types';
 import { cloneSurface, createSurface, type Surface } from '../core/surface';
 import { clamp, normalizeRect, type Rect } from '../core/geometry';
 import { luminance, type RGB } from '../core/color';
 import { layerBounds, snapRect } from '../core/guides';
+import { renderShapeLayer } from '../core/shape';
 import { clearSnapLines, showSnapLines, snapContextFor } from './snap';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
@@ -84,7 +86,8 @@ export class MoveTool implements Tool {
       ? e.doc.selection.bounds()
       : layerBounds(layer);
 
-    if (e.doc.selection.active && layer.surface && !e.doc.editingMask) {
+    const regenerates = PhotoDoc.regenerates(layer);
+    if (e.doc.selection.active && layer.surface && !e.doc.editingMask && !regenerates) {
       const sel = e.doc.selection.toSurface();
       const w = layer.surface.w, h = layer.surface.h;
       this.floatSurf = createSurface(w, h);
@@ -163,6 +166,10 @@ export class MoveTool implements Tool {
         e.doc.touch();
       }
     } else if (dx !== 0 || dy !== 0) {
+      // A shape layer keeps its position in the path, not in the layer offset.
+      if (this.layer.kind === 'shape' && this.layer.shape) {
+        renderShapeLayer(this.layer, e.doc.width, e.doc.height);
+      }
       e.doc.commit('移動圖層');
     }
     this.mode = 'none';

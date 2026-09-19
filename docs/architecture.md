@@ -11,7 +11,8 @@ main.ts
        ├─ ui/toolbar.ts    工具列與前景/背景色
        ├─ ui/optionsbar.ts 依作用中工具的 options 宣告自動產生控制項
        ├─ ui/canvas-view.ts 畫布視埠：座標轉換、指標事件、疊加層繪製
-       └─ ui/panels/*      導覽器、顏色、步驟記錄、圖層／色版／路徑頁籤群組
+       └─ ui/panels/*      導覽器、顏色、色階分佈圖、步驟記錄、
+                           圖層／色版／路徑／筆刷頁籤群組
 core/                      與 DOM UI 無關的文件模型
 tools/                     工具實作，只依賴 core
 filters/                   純函式：輸入 ImageData，就地修改
@@ -84,7 +85,42 @@ UI 透過 `core/app.ts` 的 `App` 單例取得狀態，並以 `Emitter` 發送�
 - 動態虛線邊框由 `traceLoops()` 產生：先在「內/外」交界產生單位有向邊，
   再串接成封閉迴圈，這樣 `setLineDash` 才能沿著輪廓連續跑。
 
-## 向量路徑
+## 向量形狀圖層
+
+`core/shape.ts` 把一個 `VectorPath` 加上 `ShapeStyle` 綁成 `ShapeLayerData`，
+挂在 `layer.shape` 上，`layer.kind` 為 `'shape'`。像素是讀取端：
+`renderShapeLayer()` 每次都把幾何重新畫成文件大小的 Surface，
+因此後續的合成、混合模式、遮色片與圖層樣式完全不用特別處理。
+
+- 筆畫對齊：`center` 直接描邊；`inside` / `outside` 先用雙倍寬度的置中筆畫
+  畫在另一張 Surface 上，再以 `destination-in` / `destination-out` 跟填色區域相交或相減，
+  效果等同於只保留形狀內側或外側的那一半。
+- `shapeToVectorPath()` 把七種形狀轉成貝茲路徑；圓弧以
+  `KAPPA = 0.5522847498307936` 決定控制桿長度（四段三次貝茲近似圓的標準係數）。
+- 直接選取工具透過 `editablePath()` 先看作用中的圖層是不是未鎖定的形狀圖層，
+  是的話就編輯它自己的路徑，否則回到文件的工作路徑；每次改動後呼叫 `afterEdit()` 重畫。
+- 幾何是**可變物件**，所以 `shallowCopyLayer()` 與 `duplicateLayer()` 都必須深拷貝
+  （`cloneShape()`），否則步驟記錄的快取會跟現場共用同一組控制點。
+- 畫布幾何運算搬動控制點而不重新取樣：`resampleTo()` 等比縮放錐點與筆畫寬度、
+  `resizeCanvas()` 位移、`transformAll()` 則用 `canvasPointMap()` 把旋轉與翻轉映射到點上。
+- 位置也存在幾何裡：`renderShapeLayer()` 會先把 `layer.x/y` 折入控制點再歸零，
+  因此移動工具拖曳完、下一次重畫時不會彈回原位；任意變形則以與預覽相同的
+  矩陣搬動控制點（筆畫寬度乘上 `sqrt(|sx*sy|)`）而不是烘成像素。
+- `paintTarget()` 對形狀圖層回傳 `null`（跟智慧型物件一樣），否則筆刷畫上去的
+  像素會在下一次重畫時消失；`paintBlockReason()` 負責把原因講給使用者聽。
+- `core/ids.ts` 只放 `uid()`。拆出來是因為 `layer.ts` 要 import `shape.ts` 的型別、
+  而 `shape.ts` 又要 `uid()`，直接互相 import 會形成循環。
+
+## 面板
+
+- **色階分佈圖**（`ui/panels/histogram.ts`）：`computeHistogram()` 算出 256 格統計，
+  `statsFor()` 再從直方圖直接算平均值、標準差與中間值（不再跑一次像素）。
+  結果以 `doc.revision` 加來源做快取，面板收起時 `refresh()` 直接返回，
+  所以不會在每一筆筆刷中重算全圖。
+- **圖層搜尋與篩選**（`ui/panels/layers.ts`）：`layerMatchesFilter()` 是純函式，
+  本層不命中時會遞迴看子圖層，因此群組會因為裡面的圖層命中而一併保留。
+
+## 路徑與筆型工具
 
 `core/path.ts` 的 `VectorPath` 由多個 `SubPath` 組成，每個子路徑是一串 `Anchor`。
 控制桿（`inX/inY`、`outX/outY`）存絕對文件座標，命中測試與拖曳都不需要換算。
@@ -305,7 +341,8 @@ interface Tool {
 版本 2 起另外包含 `paths`、`activePathId` 與 `channels`，
 智慧型物件圖層會多存一個 `smart` 區塊（內嵌原始來源的 PNG 與放置資料、濾鏡堆疊）；
 版本 3 再加上 `quickMask`，所以存檔時停在快速遮色片模式也不會遺失；
-版本 4 加上 `guides` 與 `guidesLocked`。
+版本 4 加上 `guides` 與 `guidesLocked`；
+版本 5 加上形狀圖層的 `shape`（路徑幾何與樣式，載入後重新描繪）。
 載入後會重新渲染智慧型物件的快取。格式演進時請提高 `version`
 並在 `io/files.ts` 的 `loadProject()` 內做向下相容處理。
 

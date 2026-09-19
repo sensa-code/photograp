@@ -6,6 +6,10 @@ import { createSurface, type Surface } from '../core/surface';
 import { clamp, normalizeRect } from '../core/geometry';
 import { rgbCss, type RGB } from '../core/color';
 import { createRasterLayer, createTextLayer } from '../core/layer';
+import {
+  defaultShapeStyle, renderShapeLayer, shapeToVectorPath, type ShapeKind as VectorShapeKind,
+} from '../core/shape';
+import type { Layer as LayerType } from '../core/types';
 import { defaultTextStyle, renderTextLayer } from '../core/text';
 import { floodSelect } from './select';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
@@ -64,7 +68,7 @@ export class BucketTool implements Tool {
   down(e: ToolPointer): void {
     const target = e.doc.paintTarget();
     if (!target) {
-      e.app.toast('此圖層無法填色', 'error');
+      e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法填色', 'error');
       return;
     }
     const x = Math.floor(e.x), y = Math.floor(e.y);
@@ -310,7 +314,7 @@ export class GradientTool implements Tool {
   down(e: ToolPointer): void {
     const target = e.doc.paintTarget();
     if (!target) {
-      e.app.toast('此圖層無法填入漸層', 'error');
+      e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法填入漸層', 'error');
       return;
     }
     this.target = target;
@@ -462,6 +466,13 @@ export class ShapeTool implements Tool {
   cursor = 'crosshair';
   options: ToolOption[] = [
     {
+      key: 'output', label: '輸出', type: 'segmented', default: 'shape',
+      options: [
+        { value: 'shape', label: '形狀圖層' },
+        { value: 'pixels', label: '填滿像素' },
+      ],
+    },
+    {
       key: 'kind', label: '形狀', type: 'select', default: 'rect',
       options: [
         { value: 'rect', label: '矩形' },
@@ -493,8 +504,71 @@ export class ShapeTool implements Tool {
   private preview: Surface | null = null;
   private baseSurface: Surface | null = null;
   private target: PaintTarget | null = null;
+  /** Set while drawing a live, re-editable vector shape layer. */
+  private shapeLayer: LayerType | null = null;
+
+  /** Geometry for the current drag, with Shift constraints applied. */
+  private corners(e: ToolPointer, kind: string): [number, number, number, number] {
+    let ex = this.end.x, ey = this.end.y;
+    if (e.shift) {
+      const dx = ex - this.start.x, dy = ey - this.start.y;
+      if (kind === 'line' || kind === 'arrow') {
+        const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+        const len = Math.hypot(dx, dy);
+        ex = this.start.x + Math.cos(ang) * len;
+        ey = this.start.y + Math.sin(ang) * len;
+      } else {
+        const m = Math.max(Math.abs(dx), Math.abs(dy));
+        ex = this.start.x + Math.sign(dx || 1) * m;
+        ey = this.start.y + Math.sign(dy || 1) * m;
+      }
+    }
+    return [this.start.x, this.start.y, ex, ey];
+  }
+
+  /** Rebuild the live shape layer's geometry from the current drag. */
+  private updateShape(e: ToolPointer): void {
+    const layer = this.shapeLayer;
+    if (!layer?.shape) return;
+    const o = e.app.toolOptions[this.id] ?? {};
+    const kind = String(o.kind ?? 'rect');
+    const [x0, y0, x1, y1] = this.corners(e, kind);
+    layer.shape.path = shapeToVectorPath(
+      kind as VectorShapeKind, x0, y0, x1, y1,
+      Number(o.radius ?? 16), Number(o.sides ?? 5), layer.name,
+    );
+    renderShapeLayer(layer, e.doc.width, e.doc.height);
+    e.doc.touch();
+  }
 
   down(e: ToolPointer): void {
+    const opts = e.app.toolOptions[this.id] ?? {};
+    // While a mask or Quick Mask has the brush, the shape belongs in that
+    // channel — creating a layer there would ignore what the user is editing.
+    const intoMask = !!e.doc.quickMask || (e.doc.editingMask && !!e.doc.activeLayer()?.mask);
+    if (!intoMask && String(opts.output ?? 'shape') === 'shape') {
+      const kind = String(opts.kind ?? 'rect');
+      const mode = String(opts.paint ?? 'fill');
+      const outline = kind === 'line' || kind === 'arrow';
+      const layer = createRasterLayer('形狀', e.doc.width, e.doc.height);
+      layer.kind = 'shape';
+      const style = defaultShapeStyle(e.app.foreground, e.app.background);
+      style.fillEnabled = !outline && (mode === 'fill' || mode === 'both');
+      style.strokeEnabled = outline || mode === 'stroke' || mode === 'both';
+      if (outline || mode === 'stroke') style.stroke = { ...e.app.foreground };
+      style.strokeWidth = Number(opts.strokeWidth ?? 4);
+      layer.shape = {
+        path: shapeToVectorPath(kind as VectorShapeKind, e.x, e.y, e.x, e.y, 0, 5, '形狀'),
+        style,
+      };
+      e.doc.insertLayerAbove(layer, e.doc.activeLayerId);
+      this.shapeLayer = layer;
+      this.dragging = true;
+      this.start = { x: e.x, y: e.y };
+      this.end = { x: e.x, y: e.y };
+      e.app.changed();
+      return;
+    }
     let target = e.doc.paintTarget();
     // A brand new layer only makes sense when drawing onto layer pixels.
     const wantsNewLayer = Boolean(e.app.toolOptions[this.id]?.newLayer);
@@ -509,7 +583,10 @@ export class ShapeTool implements Tool {
         target = e.doc.paintTarget();
       }
     }
-    if (!target) { e.app.toast('此圖層無法繪製形狀', 'error'); return; }
+    if (!target) {
+      e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法繪製形狀', 'error');
+      return;
+    }
     this.target = target;
     this.baseSurface = target.surface;
     this.preview = createSurface(target.surface.w, target.surface.h);
@@ -566,13 +643,38 @@ export class ShapeTool implements Tool {
   }
 
   move(e: ToolPointer): void {
-    if (!this.dragging || !this.preview) return;
+    if (!this.dragging) return;
     this.end = { x: e.x, y: e.y };
+    if (this.shapeLayer) {
+      this.updateShape(e);
+      e.app.changed();
+      return;
+    }
+    if (!this.preview) return;
     this.paint(e, this.preview);
     e.app.changed();
   }
 
   up(e: ToolPointer): void {
+    if (this.shapeLayer) {
+      const layer = this.shapeLayer;
+      this.dragging = false;
+      // The pointer can travel between the last move and the release, so take
+      // the geometry from this event before letting go of the layer.
+      this.end = { x: e.x, y: e.y };
+      if (Math.hypot(this.end.x - this.start.x, this.end.y - this.start.y) > 1) {
+        this.updateShape(e);
+        this.shapeLayer = null;
+        e.doc.commit('建立形狀圖層');
+      } else {
+        // A click with no drag leaves nothing behind.
+        this.shapeLayer = null;
+        e.doc.removeLayer(layer.id);
+        e.doc.touch();
+      }
+      e.app.changed();
+      return;
+    }
     if (!this.dragging || !this.target) return;
     this.dragging = false;
     e.doc.clearPaintPreview();
@@ -590,7 +692,9 @@ export class ShapeTool implements Tool {
 
   cancel(app: App): void {
     const doc = app.activeDoc();
+    if (doc && this.shapeLayer) doc.removeLayer(this.shapeLayer.id);
     if (doc) { doc.clearPaintPreview(); doc.touch(); }
+    this.shapeLayer = null;
     this.dragging = false;
     this.preview = this.baseSurface = null;
     this.target = null;

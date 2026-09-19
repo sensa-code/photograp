@@ -2,6 +2,7 @@ import type { App } from '../core/app';
 import type { Layer } from '../core/types';
 import { createSurface, opaqueBounds, type Surface } from '../core/surface';
 import { renderSmartLayer } from '../core/smart';
+import { renderShapeLayer, transformPathPoints } from '../core/shape';
 import { clamp, type Rect } from '../core/geometry';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
@@ -48,6 +49,9 @@ export class TransformTool implements Tool {
       app.toast('請先選擇一個可變形的點陣圖層', 'error');
       return false;
     }
+    // A shape layer keeps its position in the path; fold in any pending offset
+    // first so the bounds below are in the same space as the anchors.
+    if (layer.kind === 'shape' && layer.shape) renderShapeLayer(layer, doc.width, doc.height);
     if (layer.kind === 'smart' && layer.smart) {
       const so = layer.smart;
       this.state = {
@@ -232,6 +236,19 @@ export class TransformTool implements Tool {
         cx: s.cx, cy: s.cy, scaleX: s.sx, scaleY: s.sy, angle: s.angle,
       };
       renderSmartLayer(s.layer, doc.width, doc.height);
+    } else if (s.layer.kind === 'shape' && s.layer.shape) {
+      // Move the anchors with the same matrix the preview used, so the shape
+      // stays re-editable instead of being flattened into pixels.
+      const midX = s.src.x + s.src.w / 2, midY = s.src.y + s.src.h / 2;
+      const cos = Math.cos(s.angle), sin = Math.sin(s.angle);
+      transformPathPoints(s.layer.shape.path, (p) => {
+        const x = (p.x - midX) * s.sx, y = (p.y - midY) * s.sy;
+        return { x: s.cx + x * cos - y * sin, y: s.cy + x * sin + y * cos };
+      });
+      // A single stroke width cannot follow a non-uniform scale, so use the
+      // geometric mean, the same compromise the resampler makes.
+      s.layer.shape.style.strokeWidth *= Math.sqrt(Math.abs(s.sx * s.sy));
+      renderShapeLayer(s.layer, doc.width, doc.height);
     } else {
       const target = doc.mutableSurface(s.layer);
       target.ctx.clearRect(0, 0, target.w, target.h);

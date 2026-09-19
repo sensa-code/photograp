@@ -6,12 +6,13 @@ import { Selection } from '../core/selection';
 import { clonePath, type VectorPath } from '../core/path';
 import type { AlphaChannel } from '../core/channels';
 import { renderSmartLayer } from '../core/smart';
+import { renderShapeLayer } from '../core/shape';
 import type { QuickMask } from '../core/quickmask';
 import type { Guide } from '../core/guides';
 
 export const PROJECT_EXT = '.pgraph';
 const PROJECT_MAGIC = 'photograp-project';
-const PROJECT_VERSION = 4;
+const PROJECT_VERSION = 5;
 
 export interface OpenedImage { name: string; image: HTMLImageElement }
 
@@ -105,6 +106,7 @@ interface SerializedLayer {
   children?: SerializedLayer[];
   expanded?: boolean;
   smart?: SerializedSmart;
+  shape?: Layer['shape'];
 }
 
 interface SerializedSmart {
@@ -176,6 +178,10 @@ function serializeLayer(l: Layer): SerializedLayer {
         angle: l.smart.angle,
         filters: l.smart.filters,
       }
+      : undefined,
+    // Shape geometry is plain data, so it serialises as-is.
+    shape: l.shape
+      ? JSON.parse(JSON.stringify(l.shape)) as Layer['shape']
       : undefined,
   };
 }
@@ -283,6 +289,7 @@ async function deserializeLayer(s: SerializedLayer, w: number, h: number): Promi
     expanded: s.expanded ?? true,
     children,
     smart,
+    shape: s.shape ? JSON.parse(JSON.stringify(s.shape)) as Layer['shape'] : undefined,
   };
 }
 
@@ -314,9 +321,10 @@ export async function loadProject(text: string): Promise<PhotoDoc> {
     };
     doc.quickMask = qm;
   }
-  // Smart caches are not stored; rebuild them from the embedded sources.
+  // Generated pixels are not stored; rebuild them from the saved data.
   for (const l of doc.allLayers()) {
     if (l.kind === 'smart' && l.smart) renderSmartLayer(l, doc.width, doc.height);
+    else if (l.kind === 'shape' && l.shape) renderShapeLayer(l, doc.width, doc.height);
   }
   if (data.selection) {
     const img = await loadImageSrc(data.selection);

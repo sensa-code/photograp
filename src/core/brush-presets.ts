@@ -1,4 +1,4 @@
-import { uid } from './layer';
+import { uid } from './ids';
 
 /**
  * Preset values are stored in the same units the options bar uses

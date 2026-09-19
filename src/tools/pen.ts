@@ -5,10 +5,31 @@ import {
   anchorCount, createAnchor, createPath, hitTest, moveAnchor, moveHandle,
   previewPath2D, toPath2D, type Anchor, type AnchorHit, type SubPath, type VectorPath,
 } from '../core/path';
+import { renderShapeLayer } from '../core/shape';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
 /** Screen-space hit tolerance converted to document units. */
 const tol = (zoom: number): number => 7 / zoom;
+
+/**
+ * The path the vector tools should act on: a selected shape layer's own
+ * geometry if there is one, otherwise the document's work path. This is
+ * what makes a drawn shape stay re-editable.
+ */
+function editablePath(doc: PhotoDoc): { path: VectorPath; shapeLayer: boolean } | null {
+  const layer = doc.activeLayer();
+  if (layer?.kind === 'shape' && layer.shape && !layer.locked) {
+    return { path: layer.shape.path, shapeLayer: true };
+  }
+  const path = doc.activePath();
+  return path ? { path, shapeLayer: false } : null;
+}
+
+/** Re-render after geometry changed, so a shape layer shows the edit. */
+function afterEdit(doc: PhotoDoc): void {
+  const layer = doc.activeLayer();
+  if (layer?.kind === 'shape' && layer.shape) renderShapeLayer(layer, doc.width, doc.height);
+}
 
 function ensurePath(doc: PhotoDoc): VectorPath {
   let path = doc.activePath();
@@ -231,9 +252,9 @@ export class DirectSelectTool implements Tool {
   private moved = false;
 
   down(e: ToolPointer): void {
-    const path = e.doc.activePath();
-    if (!path) return;
-    this.selected = hitTest(path, e, tol(e.zoom));
+    const target = editablePath(e.doc);
+    if (!target) return;
+    this.selected = hitTest(target.path, e, tol(e.zoom));
     this.dragging = this.selected !== null;
     this.moved = false;
     e.app.changed();
@@ -241,7 +262,7 @@ export class DirectSelectTool implements Tool {
 
   move(e: ToolPointer): void {
     if (!this.dragging || !this.selected) return;
-    const path = e.doc.activePath();
+    const path = editablePath(e.doc)?.path;
     if (!path) return;
     const a = path.subpaths[this.selected.subpath]?.anchors[this.selected.anchor];
     if (!a) return;
@@ -249,19 +270,23 @@ export class DirectSelectTool implements Tool {
     if (this.selected.part === 'point') moveAnchor(a, e.x, e.y);
     else moveHandle(a, this.selected.part, e.x, e.y, mirror);
     this.moved = true;
+    afterEdit(e.doc);
     e.doc.touch();
     e.app.changed();
   }
 
   up(e: ToolPointer): void {
-    if (this.dragging && this.moved) e.doc.commit('編輯路徑');
+    if (this.dragging && this.moved) {
+      afterEdit(e.doc);
+      e.doc.commit('編輯路徑');
+    }
     this.dragging = false;
     e.app.changed();
   }
 
   key(ev: KeyboardEvent, app: App): boolean {
     const doc = app.activeDoc();
-    const path = doc?.activePath();
+    const path = doc ? editablePath(doc)?.path : null;
     if (!doc || !path || !this.selected) return false;
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
       const sp = path.subpaths[this.selected.subpath];
@@ -269,6 +294,7 @@ export class DirectSelectTool implements Tool {
       sp.anchors.splice(this.selected.anchor, 1);
       if (sp.anchors.length < 2) path.subpaths.splice(this.selected.subpath, 1);
       this.selected = null;
+      afterEdit(doc);
       doc.commit('刪除控制點');
       app.changed();
       return true;
@@ -282,6 +308,7 @@ export class DirectSelectTool implements Tool {
       const a = path.subpaths[this.selected.subpath]?.anchors[this.selected.anchor];
       if (a) {
         moveAnchor(a, a.x + d[0], a.y + d[1]);
+        afterEdit(doc);
         doc.commit('移動控制點');
         app.changed();
       }
@@ -291,7 +318,7 @@ export class DirectSelectTool implements Tool {
   }
 
   drawOverlay(o: OverlayPaint): void {
-    const path = o.doc.activePath();
+    const path = editablePath(o.doc)?.path;
     if (!path) return;
     drawPathOverlay(o.ctx, path, o.zoom, { anchors: true, selected: this.selected });
   }

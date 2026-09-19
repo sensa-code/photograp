@@ -12,6 +12,7 @@ import { clonePath, type VectorPath } from './path';
 import type { Guide } from './guides';
 import { renderChannelView, type AlphaChannel, type ChannelView } from './channels';
 import { renderSmartLayer } from './smart';
+import { renderShapeLayer, transformPathPoints } from './shape';
 import {
   createQuickMask, quickMaskCoverage, quickMaskIsFull, renderQuickMaskOverlay, type QuickMask,
 } from './quickmask';
@@ -125,10 +126,11 @@ export class PhotoDoc {
 
   clonePaths(): VectorPath[] { return this.paths.map(clonePath); }
 
-  /** Re-render every smart object whose cache is missing or stale. */
-  refreshSmartLayers(): void {
+  /** Re-render every layer whose pixels are generated from other data. */
+  refreshGeneratedLayers(): void {
     for (const l of this.allLayers()) {
       if (l.kind === 'smart' && l.smart) renderSmartLayer(l, this.width, this.height);
+      else if (l.kind === 'shape' && l.shape) renderShapeLayer(l, this.width, this.height);
     }
   }
 
@@ -196,13 +198,36 @@ export class PhotoDoc {
     if (this.editingMask && layer.mask) {
       return { layer, surface: layer.mask, slot: 'mask', offX: 0, offY: 0, clipToSelection: true };
     }
-    // Smart objects re-render from their source, so direct paint would be lost.
-    if (layer.kind === 'smart') return null;
+    // Smart objects and shape layers re-render from their own source data,
+    // so direct paint would be thrown away. Rasterize first.
+    if (layer.kind === 'smart' || layer.kind === 'shape') return null;
     if (!layer.surface) return null;
     return {
       layer, surface: layer.surface, slot: 'pixels',
       offX: layer.x, offY: layer.y, clipToSelection: true,
     };
+  }
+
+  /**
+   * Shape layers and smart objects rebuild their pixels from their own source
+   * data, so anything written straight into `layer.surface` is lost on the
+   * next redraw. Destructive commands check this before touching a layer.
+   */
+  static regenerates(layer: Layer): boolean {
+    return layer.kind === 'shape' || layer.kind === 'smart';
+  }
+
+  /** Why `paintTarget()` came back empty, phrased for the user. */
+  paintBlockReason(): string | null {
+    if (this.paintTarget()) return null;
+    const layer = this.activeLayer();
+    if (!layer) return '請先選擇一個圖層';
+    if (layer.locked) return '圖層已鎖定，請先解除鎖定';
+    if (layer.kind === 'shape') return '形狀圖層請先點陣化才能塗抹';
+    if (layer.kind === 'smart') return '智慧型物件請先點陣化才能塗抹';
+    if (layer.kind === 'group') return '群組圖層請先點陣化才能塗抹';
+    if (!layer.surface) return '此圖層沒有可塗抹的像素';
+    return '此圖層無法繪製';
   }
 
   /** A surface for the given slot that is safe to write into. */
@@ -347,6 +372,10 @@ export class PhotoDoc {
             scaleX: l.smart.scaleX * sx,
             scaleY: l.smart.scaleY * sy,
           };
+        } else if (l.kind === 'shape' && l.shape) {
+          // Vector geometry scales exactly; the pixels are redrawn after.
+          transformPathPoints(l.shape.path, (p) => ({ x: p.x * sx, y: p.y * sy }));
+          l.shape.style.strokeWidth *= (sx + sy) / 2;
         } else if (l.surface) {
           l.surface = resampleSurface(l.surface, w, h, smooth);
         }
@@ -365,7 +394,7 @@ export class PhotoDoc {
       pos: g.axis === 'v' ? g.pos * sx : g.pos * sy,
     }));
     this.resampleQuickMask(w, h, smooth);
-    this.refreshSmartLayers();
+    this.refreshGeneratedLayers();
   }
 
   /** Keep the Quick Mask in step with the document geometry. */
@@ -401,6 +430,9 @@ export class PhotoDoc {
         if (l.kind === 'smart' && l.smart) {
           l.smart = { ...l.smart, cx: l.smart.cx + offsetX, cy: l.smart.cy + offsetY };
         }
+        if (l.kind === 'shape' && l.shape) {
+          transformPathPoints(l.shape.path, (p) => ({ x: p.x + offsetX, y: p.y + offsetY }));
+        }
         if (l.surface) {
           const s = createSurface(w, h);
           s.ctx.drawImage(l.surface.canvas, offsetX, offsetY);
@@ -425,7 +457,7 @@ export class PhotoDoc {
       .filter((g) => g.pos >= 0 && g.pos <= (g.axis === 'v' ? w : h));
     const qmSource = this.quickMask?.surface;
     if (qmSource) this.redrawQuickMask(w, h, (ctx) => ctx.drawImage(qmSource.canvas, offsetX, offsetY));
-    this.refreshSmartLayers();
+    this.refreshGeneratedLayers();
   }
 
   /**
@@ -439,6 +471,20 @@ export class PhotoDoc {
   ): void {
     const walk = (list: Layer[]): void => {
       for (const l of list) {
+        if (l.kind === 'shape' && l.shape && smartOp) {
+          const map = canvasPointMap(smartOp, w, h);
+          transformPathPoints(l.shape.path, map);
+          l.x = 0; l.y = 0;
+          if (l.mask) {
+            const m = createSurface(w, h);
+            m.ctx.save(); apply(m.ctx);
+            m.ctx.drawImage(l.mask.canvas, 0, 0);
+            m.ctx.restore();
+            l.mask = m;
+          }
+          if (l.children) walk(l.children);
+          continue;
+        }
         if (l.kind === 'smart' && l.smart && smartOp) {
           l.smart = { ...l.smart, ...remapSmart(l.smart, smartOp, this.width, this.height, w, h) };
           l.x = 0; l.y = 0;
@@ -478,11 +524,24 @@ export class PhotoDoc {
     if (qmSource) {
       this.redrawQuickMask(w, h, (ctx) => { apply(ctx); ctx.drawImage(qmSource.canvas, 0, 0); });
     }
-    this.refreshSmartLayers();
+    this.refreshGeneratedLayers();
   }
 }
 
 export type SmartCanvasOp = 'rot90' | 'rot-90' | 'rot180' | 'flipH' | 'flipV';
+
+/** Map a document point through a canvas rotate / flip. */
+export function canvasPointMap(
+  op: SmartCanvasOp, newW: number, newH: number,
+): (p: { x: number; y: number }) => { x: number; y: number } {
+  switch (op) {
+    case 'rot90': return (p) => ({ x: newW - p.y, y: p.x });
+    case 'rot-90': return (p) => ({ x: p.y, y: newH - p.x });
+    case 'rot180': return (p) => ({ x: newW - p.x, y: newH - p.y });
+    case 'flipH': return (p) => ({ x: newW - p.x, y: p.y });
+    case 'flipV': return (p) => ({ x: p.x, y: newH - p.y });
+  }
+}
 
 /** Map a smart object's placement through a canvas rotate / flip. */
 function remapSmart(

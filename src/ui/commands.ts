@@ -3,8 +3,10 @@ import { PhotoDoc } from '../core/document';
 import type { AdjustmentSpec, Layer } from '../core/types';
 import {
   createAdjustmentLayer, createGroupLayer, createRasterLayer, duplicateLayer,
-  findParent, flattenLayers,
+  findParent, flattenLayers, layerKindLabel,
 } from '../core/layer';
+import { layerBounds } from '../core/guides';
+import { renderShapeLayer, transformPathPoints } from '../core/shape';
 import { cloneSurface, createSurface, opaqueBounds } from '../core/surface';
 import { compositeLayers } from '../core/compositor';
 import { maskFromCoverage, coverageFromMask, maskAlpha } from '../core/mask';
@@ -170,6 +172,16 @@ function flattenImage(app: App): void {
   app.changed();
 }
 
+/**
+ * Refuse a destructive pixel edit on a layer that would just redraw over it.
+ * Rasterizing first is the way out, exactly as in Photoshop.
+ */
+function guardPixelEdit(app: App, layer: Layer): boolean {
+  if (!PhotoDoc.regenerates(layer)) return true;
+  app.toast(`${layerKindLabel(layer)}請先點陣化才能直接修改像素`, 'error');
+  return false;
+}
+
 function rasterizeLayer(app: App): void {
   const doc = app.activeDoc();
   const layer = doc?.activeLayer();
@@ -225,6 +237,7 @@ function applyLayerMask(app: App): void {
   const doc = app.activeDoc();
   const layer = doc?.activeLayer();
   if (!doc || !layer || !layer.mask || !layer.surface) return;
+  if (!guardPixelEdit(app, layer)) return;
   const target = doc.mutableSurface(layer);
   target.ctx.save();
   target.ctx.globalCompositeOperation = 'destination-in';
@@ -240,6 +253,7 @@ function autoTone(app: App, mode: 'tone' | 'contrast'): void {
   const doc = app.activeDoc();
   const layer = doc?.activeLayer();
   if (!doc || !layer?.surface) return;
+  if (!guardPixelEdit(app, layer)) return;
   const img = layer.surface.ctx.getImageData(0, 0, layer.surface.w, layer.surface.h);
   const d = img.data;
   const channels: [number, number][] = [[255, 0], [255, 0], [255, 0]];
@@ -325,6 +339,19 @@ function flipLayer(app: App, axis: 'h' | 'v'): void {
   const doc = app.activeDoc();
   const layer = doc?.activeLayer();
   if (!doc || !layer?.surface) return;
+  if (layer.kind === 'shape' && layer.shape) {
+    // Mirror the geometry inside its own bounds so the shape stays editable.
+    const b = layerBounds(layer) ?? { x: 0, y: 0, w: doc.width, h: doc.height };
+    transformPathPoints(layer.shape.path, (p) => ({
+      x: axis === 'h' ? b.x * 2 + b.w - p.x : p.x,
+      y: axis === 'v' ? b.y * 2 + b.h - p.y : p.y,
+    }));
+    renderShapeLayer(layer, doc.width, doc.height);
+    doc.commit(axis === 'h' ? '水平翻轉圖層' : '垂直翻轉圖層');
+    app.changed();
+    return;
+  }
+  if (!guardPixelEdit(app, layer)) return;
   const src = cloneSurface(layer.surface);
   const target = doc.mutableSurface(layer);
   target.ctx.clearRect(0, 0, target.w, target.h);

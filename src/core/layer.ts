@@ -1,9 +1,10 @@
 import type { AdjustmentSpec, Layer, LayerEffects, TextStyle } from './types';
 import { cloneSurface, createSurface, type Surface } from './surface';
+import { uid } from './ids';
+import { clonePath } from './path';
+import { cloneShapeStyle } from './shape';
 
-let counter = 0;
-export const uid = (prefix = 'l'): string =>
-  `${prefix}${(++counter).toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+export { uid } from './ids';
 
 export function defaultEffects(): LayerEffects {
   return {
@@ -63,7 +64,14 @@ export function shallowCopyLayer(l: Layer): Layer {
     smart: l.smart
       ? { ...l.smart, filters: l.smart.filters.map((f) => ({ ...f, params: { ...f.params } })) }
       : undefined,
+    // Geometry is cheap and must not be shared, or editing one copy of a
+    // shape layer would silently rewrite the history snapshots too.
+    shape: l.shape ? cloneShape(l.shape) : undefined,
   };
+}
+
+function cloneShape(s: NonNullable<Layer['shape']>): NonNullable<Layer['shape']> {
+  return { path: clonePath(s.path), style: cloneShapeStyle(s.style) };
 }
 
 /** Deep copy including pixel data; used by Duplicate Layer. */
@@ -80,6 +88,7 @@ export function duplicateLayer(l: Layer, nameSuffix = ' 拷貝'): Layer {
       filters: l.smart.filters.map((f) => ({ ...f, params: { ...f.params } })),
     };
   }
+  if (l.shape) copy.shape = cloneShape(l.shape);
   if (copy.children) copy.children = l.children!.map((c) => duplicateLayer(c, ''));
   return copy;
 }
@@ -130,6 +139,7 @@ export function layerKindLabel(l: Layer): string {
     case 'adjustment': return '調整圖層';
     case 'group': return '圖層群組';
     case 'smart': return '智慧型物件';
+    case 'shape': return '形狀圖層';
     default: return '圖層';
   }
 }

@@ -8,6 +8,9 @@ import { pathFromLoops, toPath2D, createPath, pathIsEmpty, anchorCount } from '.
 import { channelCoverage, createAlphaChannel } from '../core/channels';
 import { quickMaskCoverage } from '../core/quickmask';
 import { createGuide, type GuideAxis } from '../core/guides';
+import {
+  cloneShapeStyle, describeShape, renderShapeLayer, type ShapeStyle,
+} from '../core/shape';
 import { applyFillRegion, contentAwareFill } from '../filters/inpaint';
 import { dilateMask } from '../filters/heal';
 import { createSmartObject, renderSmartLayer, replaceSmartSource, smartFilterEntry } from '../core/smart';
@@ -446,6 +449,69 @@ function guidesFromSelection(app: App): void {
   app.changed();
 }
 
+/** The active layer when it is an unlocked, re-editable vector shape. */
+const shapeLayer = (app: App): ReturnType<PhotoDoc['activeLayer']> => {
+  const l = doc(app)?.activeLayer();
+  return l && l.kind === 'shape' && l.shape ? l : null;
+};
+
+function shapeOptionsDialog(app: App): void {
+  const d = doc(app);
+  const layer = shapeLayer(app);
+  if (!d || !layer?.shape) return;
+  const original = cloneShapeStyle(layer.shape.style);
+  const style = layer.shape.style;
+
+  const apply = <K extends keyof ShapeStyle>(key: K, value: ShapeStyle[K]): void => {
+    style[key] = value;
+    renderShapeLayer(layer, d.width, d.height);
+    d.touch();
+    app.changed();
+  };
+
+  const body = formGrid([
+    [null, el('div', { class: 'hint', text: describeShape(layer.shape) })],
+    [null, checkboxControl('填色', style.fillEnabled, (v) => apply('fillEnabled', v))],
+    ['顏色', colorChip(style.fill, (c) => apply('fill', c))],
+    ['不透明度', sliderControl(style.fillOpacity * 100, 0, 100, 1,
+      (v) => apply('fillOpacity', v / 100), '%')],
+    [null, checkboxControl('筆畫', style.strokeEnabled, (v) => apply('strokeEnabled', v))],
+    ['筆畫顏色', colorChip(style.stroke, (c) => apply('stroke', c))],
+    ['筆畫寬度', sliderControl(style.strokeWidth, 0, 200, 0.5,
+      (v) => apply('strokeWidth', v), 'px')],
+    ['筆畫不透明度', sliderControl(style.strokeOpacity * 100, 0, 100, 1,
+      (v) => apply('strokeOpacity', v / 100), '%')],
+    ['對齊', selectControl(style.strokeAlign, [
+      { value: 'center', label: '置中' },
+      { value: 'inside', label: '內部' },
+      { value: 'outside', label: '外部' },
+    ], (v) => apply('strokeAlign', v as ShapeStyle['strokeAlign']))],
+    ['虛線', sliderControl(style.dash, 0, 60, 1, (v) => apply('dash', v), 'px')],
+    ['轉角', selectControl(style.lineJoin, [
+      { value: 'miter', label: '尖角' },
+      { value: 'round', label: '圓角' },
+      { value: 'bevel', label: '斜角' },
+    ], (v) => apply('lineJoin', v as CanvasLineJoin))],
+    ['端點', selectControl(style.lineCap, [
+      { value: 'butt', label: '平端' },
+      { value: 'round', label: '圓端' },
+      { value: 'square', label: '方端' },
+    ], (v) => apply('lineCap', v as CanvasLineCap))],
+  ]);
+
+  void openModal({ title: '形狀選項', body, width: 380 }).then((res) => {
+    if (res === 'ok') {
+      d.commit('形狀選項');
+    } else {
+      // Cancel restores the style the dialog started from.
+      Object.assign(style, original);
+      renderShapeLayer(layer, d.width, d.height);
+      d.touch();
+    }
+    app.changed();
+  });
+}
+
 const snapToggle = (
   id: string, label: string, key: 'toGuides' | 'toGrid' | 'toDocument' | 'toLayers',
 ): Cmd => cmd(id, label, (a) => {
@@ -494,6 +560,11 @@ export const VECTOR_COMMANDS: Cmd[] = [
   snapToggle('view.snapDocument', '靠齊至文件邊界', 'toDocument'),
   snapToggle('view.snapLayers', '靠齊至圖層', 'toLayers'),
   cmd('view.gridSize', '格點間距…', (a) => gridSizeDialog(a)),
+
+  // ---- vector shape layers ----
+  cmd('layer.shapeOptions', '形狀選項…', (a) => shapeOptionsDialog(a), {
+    enabled: (a) => !!shapeLayer(a),
+  }),
 
 
   // ---- liquify ----

@@ -1,4 +1,4 @@
-import { uid } from './layer';
+import { uid } from './ids';
 import type { Layer } from './types';
 import { opaqueBounds } from './surface';
 import type { Rect } from './geometry';

@@ -64,7 +64,7 @@ abstract class StrokeTool implements Tool {
   down(e: ToolPointer): void {
     const target = e.doc.paintTarget();
     if (!target) {
-      e.app.toast('此圖層無法繪製（已鎖定或非點陣圖層）', 'error');
+      e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法繪製', 'error');
       return;
     }
     this.stroke = this.makeStroke(e, target);
@@ -275,7 +275,7 @@ abstract class RetouchTool implements Tool {
 
   down(e: ToolPointer): void {
     const target = e.doc.paintTarget();
-    if (!target) { e.app.toast('此圖層無法編輯', 'error'); return; }
+    if (!target) { e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法編輯', 'error'); return; }
     const r = this.radius(e);
     this.ds = new DirectStroke(
       e.doc, target.layer, target.surface, target.slot,
@@ -483,7 +483,7 @@ export class CloneStampTool implements Tool {
       return;
     }
     const target = e.doc.paintTarget();
-    if (!target) { e.app.toast('此圖層無法編輯', 'error'); return; }
+    if (!target) { e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法編輯', 'error'); return; }
 
     const o = e.app.toolOptions[this.id] ?? {};
     const aligned = o.aligned !== false;

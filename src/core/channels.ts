@@ -1,5 +1,5 @@
 import { createSurface, type Surface } from './surface';
-import { uid } from './layer';
+import { uid } from './ids';
 import { luminance } from './color';
 
 export type ColorChannel = 'r' | 'g' | 'b';

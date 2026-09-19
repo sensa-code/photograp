@@ -1,7 +1,7 @@
 import type { Layer, SmartFilterEntry, SmartObject } from './types';
 import { createSurface, cloneSurface, type Surface } from './surface';
 import { clamp, type Rect } from './geometry';
-import { uid } from './layer';
+import { uid } from './ids';
 import { getFilter, type ParamValue } from '../filters/registry';
 import { blendImageData, isNativeBlend } from './blend';
 

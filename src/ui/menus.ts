@@ -110,6 +110,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       ]),
       cmdEntry('layer.clip'),
       cmdEntry('layer.style'),
+      cmdEntry('layer.shapeOptions'),
       sep,
       sub('智慧型物件', [
         cmdEntry('smart.convert'),

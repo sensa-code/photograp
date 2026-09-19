@@ -89,7 +89,7 @@ export interface TextStyle {
   strokeColor: RGB;
 }
 
-export type LayerKind = 'raster' | 'text' | 'adjustment' | 'group' | 'smart';
+export type LayerKind = 'raster' | 'text' | 'adjustment' | 'group' | 'smart' | 'shape';
 
 /** One non-destructive filter stacked on a smart object. */
 export interface SmartFilterEntry {
@@ -147,6 +147,7 @@ export interface Layer {
   text?: TextStyle;
   adjustment?: AdjustmentSpec;
   smart?: SmartObject;
+  shape?: import('./shape').ShapeLayerData;
   /** Group layers own children (top of array renders last, i.e. on top). */
   children?: Layer[];
   expanded?: boolean;

@@ -43,6 +43,15 @@ import {
   collectSnapTargets, createGuide, defaultSnapSettings, guideAt, layerBounds,
   snapGroup, snapPoint, snapRect, snapScalar,
 } from '../src/core/guides';
+import {
+  cloneShapeStyle, defaultShapeStyle, describeShape, renderShapeLayer,
+  shapeToVectorPath, transformPathPoints,
+} from '../src/core/shape';
+import { computeHistogram } from '../src/ui/dialogs/widgets';
+import { transformTool } from '../src/tools';
+import { runCommand } from '../src/ui/commands';
+import { statsFor } from '../src/ui/panels/histogram';
+import { layerMatchesFilter } from '../src/ui/panels/layers';
 
 interface Case { name: string; error?: string }
 const groups: { name: string; cases: Case[] }[] = [];
@@ -1456,6 +1465,442 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- vector shape layers ----
+  group('向量形狀圖層');
+  await test('矩形與橢圓會產生正確的控制點數', () => {
+    const rect = shapeToVectorPath('rect', 10, 20, 50, 60, 0, 5);
+    assert(rect.subpaths.length === 1 && rect.subpaths[0].closed, '矩形應為單一封閉子路徑');
+    assert(anchorCount(rect) === 4, `矩形應有 4 個控制點，實得 ${anchorCount(rect)}`);
+    const ellipse = shapeToVectorPath('ellipse', 0, 0, 40, 20, 0, 5);
+    assert(anchorCount(ellipse) === 4, '橢圓應以 4 個平滑點近似');
+    assert(ellipse.subpaths[0].anchors.every((a) => a.smooth), '橢圓控制點應為平滑點');
+    const star = shapeToVectorPath('star', 0, 0, 100, 100, 0, 6);
+    assert(anchorCount(star) === 12, `六角星應有 12 個控制點，實得 ${anchorCount(star)}`);
+    const line = shapeToVectorPath('line', 3, 4, 33, 44, 0, 5);
+    assert(anchorCount(line) === 2 && !line.subpaths[0].closed, '線段應為 2 點開放路徑');
+  });
+  await test('形狀圖層會依樣式描繪填色與筆畫', () => {
+    const doc = PhotoDoc.createBlank('shape', 60, 60, 'white');
+    const layer = createRasterLayer('形狀', 60, 60);
+    layer.kind = 'shape';
+    const style = defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 255 });
+    style.strokeEnabled = true;
+    style.strokeWidth = 6;
+    style.strokeAlign = 'inside';
+    layer.shape = { path: shapeToVectorPath('rect', 10, 10, 50, 50, 0, 5), style };
+    renderShapeLayer(layer, doc.width, doc.height);
+    assert(layer.x === 0 && layer.y === 0, '形狀圖層應為文件大小');
+    const c = pixel(layer.surface!, 30, 30);
+    assert(c[0] > 200 && c[2] < 60, `中心應為填色紅，實得 ${c}`);
+    const edge = pixel(layer.surface!, 30, 12);
+    assert(edge[2] > 200 && edge[0] < 60, `內部對齊筆畫應落在形狀內，實得 ${edge}`);
+    const outside = pixel(layer.surface!, 30, 6);
+    assert(outside[3] === 0, '內部對齊時形狀外不應有筆畫');
+  });
+  await test('關閉填色後只剩筆畫', () => {
+    const layer = createRasterLayer('形狀', 40, 40);
+    layer.kind = 'shape';
+    const style = defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 255, b: 0 });
+    style.fillEnabled = false;
+    style.strokeEnabled = true;
+    style.strokeWidth = 4;
+    layer.shape = { path: shapeToVectorPath('ellipse', 5, 5, 35, 35, 0, 5), style };
+    renderShapeLayer(layer, 40, 40);
+    assert(pixel(layer.surface!, 20, 20)[3] === 0, '關閉填色後中心應透明');
+    assert(pixel(layer.surface!, 20, 5)[1] > 180, '筆畫仍應可見');
+  });
+  await test('形狀幾何會隨畫布變形一起搬移', () => {
+    const doc = PhotoDoc.createBlank('shape-ops', 80, 40, 'white');
+    const layer = createRasterLayer('形狀', 80, 40);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 10, 5, 30, 25, 0, 5),
+      style: defaultShapeStyle({ r: 0, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 80, 40);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    doc.transformAll(doc.width, doc.height, (ctx) => {
+      ctx.translate(doc.width, 0);
+      ctx.scale(-1, 1);
+    }, 'flipH');
+    const xs = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    near(Math.min(...xs), 80 - 30, 0.01, '水平翻轉後最左點');
+    near(Math.max(...xs), 80 - 10, 0.01, '水平翻轉後最右點');
+    doc.resampleTo(160, 80);
+    const scaled = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    near(Math.min(...scaled), (80 - 30) * 2, 0.01, '縮放後座標應等比放大');
+    assert(layer.surface!.w === 160, '重新取樣後表面應跟著更新');
+  });
+  await test('形狀圖層可存檔並還原', async () => {
+    const doc = PhotoDoc.createBlank('shape-io', 48, 48, 'white');
+    const layer = createRasterLayer('星星', 48, 48);
+    layer.kind = 'shape';
+    const style = defaultShapeStyle({ r: 12, g: 200, b: 90 }, { r: 0, g: 0, b: 0 });
+    style.dash = 5;
+    layer.shape = { path: shapeToVectorPath('star', 4, 4, 44, 44, 0, 5), style };
+    renderShapeLayer(layer, 48, 48);
+    doc.layers.push(layer);
+    const back = await loadProject(serializeDocument(doc));
+    const restored = back.layers.find((l) => l.kind === 'shape')!;
+    assert(restored, '應還原形狀圖層');
+    assert(anchorCount(restored.shape!.path) === 10, '還原後控制點數應一致');
+    near(restored.shape!.style.dash, 5, 0.001, '還原後虛線設定');
+    assert(restored.surface, '還原後應重新描繪出表面');
+    assert(restored.shape!.path !== layer.shape.path, '還原後應是獨立的幾何');
+  });
+  await test('複製形狀圖層不會共用幾何', () => {
+    const layer = createRasterLayer('形狀', 32, 32);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 2, 2, 20, 20, 0, 5),
+      style: defaultShapeStyle({ r: 1, g: 2, b: 3 }, { r: 4, g: 5, b: 6 }),
+    };
+    const copy = duplicateLayer(layer);
+    copy.shape!.path.subpaths[0].anchors[0].x = 999;
+    copy.shape!.style.strokeWidth = 42;
+    assert(layer.shape.path.subpaths[0].anchors[0].x !== 999, '複本不應改到原圖層幾何');
+    assert(layer.shape.style.strokeWidth !== 42, '複本不應改到原圖層樣式');
+    const clone = cloneShapeStyle(layer.shape.style);
+    clone.fill.r = 200;
+    assert(layer.shape.style.fill.r === 1, 'cloneShapeStyle 應深拷貝顏色');
+  });
+  await test('直接選取工具會編輯形狀圖層本身的路徑', () => {
+    const doc = PhotoDoc.createBlank('shape-edit', 64, 64, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const layer = createRasterLayer('形狀', 64, 64);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 10, 10, 40, 40, 0, 5),
+      style: defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 64, 64);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    const tool = TOOLS.find((t) => t.id === 'direct-select')!;
+    app.options(tool.id, optionDefaults(tool));
+    tool.down(pointer(doc, 10, 10));
+    tool.move(pointer(doc, 4, 4, { sx: 10, sy: 10 }));
+    tool.up(pointer(doc, 4, 4, { sx: 10, sy: 10 }));
+    const a = layer.shape.path.subpaths[0].anchors[0];
+    near(a.x, 4, 0.01, '拖曳後控制點 X');
+    near(a.y, 4, 0.01, '拖曳後控制點 Y');
+    assert(pixel(layer.surface!, 6, 6)[0] > 200, '形狀應重新描繪到新位置');
+    tool.cancel?.(app);
+  });
+  await test('形狀工具會建立可再編輯的形狀圖層', () => {
+    const doc = PhotoDoc.createBlank('shape-tool', 64, 64, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const before = doc.layers.length;
+    const tool = TOOLS.find((t) => t.id === 'shape')!;
+    app.options(tool.id, { ...optionDefaults(tool), kind: 'ellipse', output: 'shape' });
+    tool.down(pointer(doc, 8, 8));
+    tool.move(pointer(doc, 40, 40, { sx: 8, sy: 8 }));
+    tool.up(pointer(doc, 40, 40, { sx: 8, sy: 8 }));
+    assert(doc.layers.length === before + 1, '應新增一個圖層');
+    const layer = doc.layers[doc.layers.length - 1];
+    assert(layer.kind === 'shape' && layer.shape, '新圖層應為形狀圖層');
+    assert(anchorCount(layer.shape!.path) === 4, '橢圓應保留 4 個控制點');
+    assert(pixel(layer.surface!, 24, 24)[3] > 0, '形狀應已描繪');
+  });
+  await test('未拖曳的點按不會留下空圖層', () => {
+    const doc = app.activeDoc()!;
+    const before = doc.layers.length;
+    const tool = TOOLS.find((t) => t.id === 'shape')!;
+    tool.down(pointer(doc, 20, 20));
+    tool.up(pointer(doc, 20, 20));
+    assert(doc.layers.length === before, '點按後圖層數不應改變');
+  });
+  await test('形狀描述會標出啟用的項目', () => {
+    const style = defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 255 });
+    style.strokeEnabled = true;
+    style.strokeWidth = 3;
+    const text = describeShape({ path: shapeToVectorPath('rect', 0, 0, 10, 10, 0, 5), style });
+    assert(text.includes('填色') && text.includes('筆畫'), `描述不完整：${text}`);
+  });
+  await test('transformPathPoints 會一併搬移控制桿', () => {
+    const path = createPath('t');
+    const a = createAnchor(10, 10, true);
+    moveHandle(a, 'out', 20, 10, true);
+    path.subpaths.push({ anchors: [a], closed: false });
+    transformPathPoints(path, (p) => ({ x: p.x + 5, y: p.y - 2 }));
+    near(a.x, 15, 0.001, '錪點 X');
+    near(a.y, 8, 0.001, '錪點 Y');
+    near(a.outX, 25, 0.001, '外控制桿 X');
+    near(a.inX, 5, 0.001, '內控制桿 X');
+  });
+
+  await test('移動圖層的位移會寫回控制點', () => {
+    const layer = createRasterLayer('形狀', 40, 40);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 5, 5, 15, 15, 0, 5),
+      style: defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 40, 40);
+    layer.x = 12;
+    layer.y = 8;
+    renderShapeLayer(layer, 40, 40);
+    assert(layer.x === 0 && layer.y === 0, '重畫後圖層位移應歸零');
+    const xs = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    near(Math.min(...xs), 17, 0.01, '控制點應吸收水平位移');
+    assert(pixel(layer.surface!, 20, 16)[0] > 200, '形狀應畫在移動後的位置');
+    assert(pixel(layer.surface!, 8, 8)[3] === 0, '原位置應已清空');
+  });
+  await test('任意變形會搬動形狀的控制點而不是烘成像素', () => {
+    const doc = PhotoDoc.createBlank('shape-xf', 80, 80, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const layer = createRasterLayer('形狀', 80, 80);
+    layer.kind = 'shape';
+    const style = defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 });
+    style.strokeEnabled = true;
+    style.strokeWidth = 4;
+    layer.shape = { path: shapeToVectorPath('rect', 20, 30, 40, 50, 0, 5), style };
+    renderShapeLayer(layer, 80, 80);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    assert(transformTool.start(app), '應能對形狀圖層啟動變形');
+    transformTool.setScale(app, 2, 2);
+    transformTool.apply(app);
+    const xs = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    const ys = layer.shape.path.subpaths[0].anchors.map((a) => a.y);
+    near(Math.max(...xs) - Math.min(...xs), 40, 1.5, '寬度應放大一倍');
+    near(Math.max(...ys) - Math.min(...ys), 40, 1.5, '高度應放大一倍');
+    near(layer.shape.style.strokeWidth, 8, 0.01, '筆畫寬度應跟著縮放');
+    // Re-rendering from the geometry must reproduce the transformed shape.
+    const before = pixel(layer.surface!, 40, 40);
+    renderShapeLayer(layer, 80, 80);
+    const after = pixel(layer.surface!, 40, 40);
+    assert(before[3] > 0 && after[3] > 0, '變形後中心應有像素');
+    assert(before.join() === after.join(), '重畫後應與變形結果一致');
+  });
+  await test('形狀圖層不接受直接塗抹', () => {
+    const doc = PhotoDoc.createBlank('shape-paint', 40, 40, 'white');
+    const layer = createRasterLayer('形狀', 40, 40);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 5, 5, 30, 30, 0, 5),
+      style: defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 40, 40);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    assert(doc.paintTarget() === null, '形狀圖層不應回傳繪圖目標');
+    assert(doc.paintBlockReason()?.includes('點陣化'), '應告訴使用者要先點陣化');
+    doc.activeLayerId = doc.layers[0].id;
+    assert(doc.paintTarget() !== null, '點陣圖層仍可繪圖');
+    assert(doc.paintBlockReason() === null, '可繪圖時不應有阻擋原因');
+    doc.activeLayer()!.locked = true;
+    assert(doc.paintBlockReason()?.includes('鎖定'), '鎖定圖層應說明是鎖定');
+  });
+  await test('釋放位置與最後一次移動不同時以釋放點為準', () => {
+    const doc = PhotoDoc.createBlank('shape-up', 64, 64, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const tool = TOOLS.find((t) => t.id === 'shape')!;
+    app.options(tool.id, optionDefaults(tool));
+    tool.down(pointer(doc, 10, 10));
+    tool.move(pointer(doc, 20, 20, { sx: 10, sy: 10 }));
+    // The pointer keeps travelling before the button comes up.
+    tool.up(pointer(doc, 50, 44, { sx: 10, sy: 10 }));
+    const layer = doc.layers[doc.layers.length - 1];
+    const xs = layer.shape!.path.subpaths[0].anchors.map((a) => a.x);
+    const ys = layer.shape!.path.subpaths[0].anchors.map((a) => a.y);
+    near(Math.max(...xs), 50, 0.01, '右邊應跟到釋放點');
+    near(Math.max(...ys), 44, 0.01, '下邊應跟到釋放點');
+  });
+
+  await test('會自己重畫的圖層不接受破壞性像素編輯', () => {
+    const shape = createRasterLayer('形狀', 16, 16);
+    shape.kind = 'shape';
+    const smart = createRasterLayer('智慧', 16, 16);
+    smart.kind = 'smart';
+    const raster = createRasterLayer('點陣', 16, 16);
+    assert(PhotoDoc.regenerates(shape), '形狀圖層會重畫');
+    assert(PhotoDoc.regenerates(smart), '智慧型物件會重畫');
+    assert(!PhotoDoc.regenerates(raster), '點陣圖層不會重畫');
+  });
+  await test('選取範圍存在時移動形狀圖層仍搬動整層', () => {
+    const doc = PhotoDoc.createBlank('shape-move-sel', 64, 64, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const layer = createRasterLayer('形狀', 64, 64);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 10, 10, 30, 30, 0, 5),
+      style: defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 64, 64);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    doc.selection.selectAll();
+    const tool = TOOLS.find((t) => t.id === 'move')!;
+    app.options(tool.id, optionDefaults(tool));
+    tool.down(pointer(doc, 20, 20));
+    tool.move(pointer(doc, 32, 26, { sx: 20, sy: 20 }));
+    tool.up(pointer(doc, 32, 26, { sx: 20, sy: 20 }));
+    const xs = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    near(Math.min(...xs), 22, 0.01, '控制點應跟著搬動');
+    assert(layer.x === 0 && layer.y === 0, '位移應已折入幾何');
+    doc.selection.clear();
+  });
+  await test('翻轉圖層會鏡射形狀的控制點', () => {
+    const doc = PhotoDoc.createBlank('shape-flip', 64, 64, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const layer = createRasterLayer('形狀', 64, 64);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('polygon', 10, 10, 40, 30, 0, 3),
+      style: defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 64, 64);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    const before = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    runCommand(app, 'edit.flipLayerH');
+    const after = layer.shape.path.subpaths[0].anchors.map((a) => a.x);
+    assert(layer.shape, '翻轉後仍應是形狀圖層');
+    near(Math.min(...after), Math.min(...before), 0.6, '翻轉不應移動外接矩形');
+    near(Math.max(...after), Math.max(...before), 0.6, '翻轉不應移動外接矩形');
+    assert(after.join() !== before.join(), '控制點應確實被鏡射');
+  });
+  await test('編輯遮色片時形狀工具畫在遮色片上', () => {
+    const doc = PhotoDoc.createBlank('shape-mask', 48, 48, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const layer = doc.layers[0];
+    layer.mask = createSurface(48, 48);
+    layer.mask.ctx.fillStyle = '#fff';
+    layer.mask.ctx.fillRect(0, 0, 48, 48);
+    layer.maskEnabled = true;
+    doc.editingMask = true;
+    const before = doc.layers.length;
+    const tool = TOOLS.find((t) => t.id === 'shape')!;
+    app.options(tool.id, optionDefaults(tool));
+    app.foreground = { r: 0, g: 0, b: 0 };
+    tool.down(pointer(doc, 8, 8));
+    tool.move(pointer(doc, 30, 30, { sx: 8, sy: 8 }));
+    tool.up(pointer(doc, 30, 30, { sx: 8, sy: 8 }));
+    assert(doc.layers.length === before, '不應在遮色片模式下新增圖層');
+    assert(pixel(doc.layers[0].mask!, 20, 20)[0] < 60, '形狀應畫進遮色片');
+    doc.editingMask = false;
+  });
+
+  // ---- histogram panel ----
+  group('色階分佈圖');
+  await test('統計值符合已知影像', () => {
+    const s = filled(10, 10, '#808080');
+    const hist = computeHistogram(s.ctx.getImageData(0, 0, 10, 10));
+    const stats = statsFor(hist.rgb, hist.total);
+    assert(stats.pixels === 100, `像素數應為 100，實得 ${stats.pixels}`);
+    near(stats.mean, 128, 1.5, '純灰階的平均值');
+    near(stats.stdDev, 0, 0.01, '單一色調的標準差應為 0');
+    assert(stats.min === stats.max, '單一色調的最暗與最亮應相同');
+  });
+  await test('半黑半白的中間值落在資料中央', () => {
+    const s = createSurface(10, 10);
+    s.ctx.fillStyle = '#000000';
+    s.ctx.fillRect(0, 0, 10, 5);
+    s.ctx.fillStyle = '#ffffff';
+    s.ctx.fillRect(0, 5, 10, 5);
+    const hist = computeHistogram(s.ctx.getImageData(0, 0, 10, 10));
+    const stats = statsFor(hist.rgb, hist.total);
+    near(stats.mean, 127.5, 1, '半黑半白的平均值');
+    assert(stats.min === 0 && stats.max === 255, '應涵蓋全幅');
+    assert(stats.median === 0, `中間值應落在前半段，實得 ${stats.median}`);
+    near(stats.stdDev, 127.5, 1, '兩極分佈的標準差');
+  });
+  await test('完全透明的影像不會除以零', () => {
+    const s = createSurface(4, 4);
+    const hist = computeHistogram(s.ctx.getImageData(0, 0, 4, 4));
+    const stats = statsFor(hist.rgb, hist.total);
+    assert(stats.pixels === 0 && stats.mean === 0, '空白統計應為零值');
+  });
+  await test('紅色色版統計與明度不同', () => {
+    const s = filled(8, 8, 'rgb(255,0,0)');
+    const hist = computeHistogram(s.ctx.getImageData(0, 0, 8, 8));
+    near(statsFor(hist.r, hist.total).mean, 255, 0.5, '紅色版平均值');
+    near(statsFor(hist.g, hist.total).mean, 0, 0.5, '綠色版平均值');
+    assert(statsFor(hist.rgb, hist.total).mean < 200, '明度應低於純紅的紅色版');
+  });
+
+  await test('快取鍵值包含文件身分', () => {
+    const a = PhotoDoc.createBlank('a', 8, 8, 'white');
+    const b = PhotoDoc.createBlank('b', 8, 8, 'black');
+    assert(a.meta.id !== b.meta.id, '兩個文件的 id 應不同');
+    assert(a.revision === b.revision, '兩個新文件的版本號會相同，所以鍵值不能只看版本');
+    const statsOf = (d: PhotoDoc): number => {
+      const s2 = d.render();
+      const h = computeHistogram(s2.ctx.getImageData(0, 0, s2.w, s2.h));
+      return statsFor(h.rgb, h.total).mean;
+    };
+    near(statsOf(a), 255, 1, '白底文件的平均值');
+    near(statsOf(b), 0, 1, '黑底文件的平均值');
+  });
+  await test('合併影像不含快速遮色片等畫面疊加', () => {
+    const d = PhotoDoc.createBlank('overlay', 16, 16, 'white');
+    d.enterQuickMask();
+    // Paint half the channel black, which is what puts the red tint on screen.
+    const qm = d.quickMask!.surface;
+    qm.ctx.fillStyle = '#000';
+    qm.ctx.fillRect(0, 0, 8, 16);
+    const overlaid = d.composite();
+    const plain = d.render();
+    const meanOf = (s2: ReturnType<typeof createSurface>): number => {
+      const h = computeHistogram(s2.ctx.getImageData(0, 0, s2.w, s2.h));
+      return statsFor(h.rgb, h.total).mean;
+    };
+    near(meanOf(plain), 255, 1, '未疊加的合併影像應仍是白的');
+    assert(meanOf(overlaid) !== meanOf(plain), '快速遮色片疊加確實會改變畫面');
+  });
+
+  // ---- layer search and filter ----
+  group('圖層搜尋與篩選');
+  await test('名稱搜尋不分大小寫', () => {
+    const layer = createRasterLayer('Background Copy', 8, 8);
+    assert(layerMatchesFilter(layer, 'background', 'all'), '應命中小寫關鍵字');
+    assert(layerMatchesFilter(layer, 'copy', 'all'), '應命中部分字串');
+    assert(!layerMatchesFilter(layer, 'shape', 'all'), '不相符時不應命中');
+    assert(layerMatchesFilter(layer, '', 'all'), '空關鍵字應全部通過');
+  });
+  await test('類型篩選能分辨形狀與調整圖層', () => {
+    const raster = createRasterLayer('點陣', 8, 8);
+    const shape = createRasterLayer('形狀', 8, 8);
+    shape.kind = 'shape';
+    const adj = createAdjustmentLayer('levels', defaultAdjustment('levels'));
+    assert(layerMatchesFilter(shape, '', 'shape'), '形狀圖層應通過形狀篩選');
+    assert(!layerMatchesFilter(raster, '', 'shape'), '點陣圖層不應通過形狀篩選');
+    assert(layerMatchesFilter(adj, '', 'adjustment'), '調整圖層應通過調整篩選');
+    assert(layerMatchesFilter(raster, '', 'raster'), '點陣圖層應通過點陣篩選');
+  });
+  await test('遮色片與樣式篩選', () => {
+    const plain = createRasterLayer('無', 8, 8);
+    const masked = createRasterLayer('有遮色片', 8, 8);
+    masked.mask = createSurface(8, 8);
+    const styled = createRasterLayer('有樣式', 8, 8);
+    styled.effects.stroke.enabled = true;
+    assert(layerMatchesFilter(masked, '', 'masked'), '應命中有遮色片的圖層');
+    assert(!layerMatchesFilter(plain, '', 'masked'), '無遮色片不應命中');
+    assert(layerMatchesFilter(styled, '', 'effects'), '應命中有圖層樣式的圖層');
+    assert(!layerMatchesFilter(plain, '', 'effects'), '無樣式不應命中');
+  });
+  await test('群組會因子圖層命中而保留', () => {
+    const child = createRasterLayer('logo', 8, 8);
+    child.kind = 'shape';
+    const folder = createRasterLayer('資料夾', 8, 8);
+    folder.kind = 'group';
+    folder.children = [child];
+    folder.surface = null;
+    assert(layerMatchesFilter(folder, 'logo', 'all'), '子圖層命中時群組應保留');
+    assert(layerMatchesFilter(folder, '', 'shape'), '子圖層型別命中時群組應保留');
+    assert(!layerMatchesFilter(folder, 'nothing', 'all'), '全部不命中時群組應隱藏');
+    assert(layerMatchesFilter(folder, '', 'group'), '群組本身應通過群組篩選');
   });
 
   // ---- tools smoke test ----

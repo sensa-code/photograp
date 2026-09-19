@@ -75,7 +75,7 @@ abstract class HealToolBase implements Tool {
     if (!this.prepare(e)) return;
     const target = e.doc.paintTarget();
     if (!target) {
-      e.app.toast('此圖層無法修復（已鎖定或為智慧型物件）', 'error');
+      e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法修復', 'error');
       return;
     }
     this.target = target;

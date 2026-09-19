@@ -9,7 +9,7 @@ import { icon } from './../icons';
 import { runCommand } from '../commands';
 import { popupMenu } from '../menubar';
 import { cmdEntry } from '../menus';
-import { openModal } from '../modal';
+import { openModal, selectControl } from '../modal';
 
 const THUMB = 34;
 const thumbCache = new WeakMap<Surface, HTMLCanvasElement>();
@@ -27,9 +27,44 @@ function thumbFor(surface: Surface, docW: number, docH: number): HTMLCanvasEleme
   return c.canvas;
 }
 
+const KIND_FILTERS = [
+  { value: 'all', label: '所有類型' },
+  { value: 'raster', label: '點陣' },
+  { value: 'text', label: '文字' },
+  { value: 'shape', label: '形狀' },
+  { value: 'smart', label: '智慧型物件' },
+  { value: 'adjustment', label: '調整' },
+  { value: 'group', label: '群組' },
+  { value: 'effects', label: '有樣式' },
+  { value: 'masked', label: '有遮色片' },
+];
+
+/**
+ * Does this layer, or anything nested inside it, pass the panel's filter?
+ * Keeping a parent visible when a child matches is what lets a search reach
+ * into collapsed groups.
+ */
+export function layerMatchesFilter(layer: Layer, search: string, kind: string): boolean {
+  const deep = (): boolean =>
+    (layer.children ?? []).some((c) => layerMatchesFilter(c, search, kind));
+  if (search && !layer.name.toLowerCase().includes(search)) return deep();
+  switch (kind) {
+    case 'all':
+      return true;
+    case 'effects':
+      return Object.values(layer.effects).some((e) => e.enabled) || deep();
+    case 'masked':
+      return !!layer.mask || deep();
+    default:
+      return layer.kind === kind || deep();
+  }
+}
+
 export class LayersPanel {
   readonly root: HTMLElement;
   private list: HTMLElement;
+  private search = '';
+  private kindFilter = 'all';
   private opacityInput!: HTMLInputElement;
   private blendSelect!: HTMLSelectElement;
   private dragId: string | null = null;
@@ -40,6 +75,7 @@ export class LayersPanel {
       el('div', { class: 'panel-head' },
         el('span', { text: '圖層' }),
         this.headTools()),
+      this.filterRow(),
       this.controls(),
       this.list,
       this.footer());
@@ -60,8 +96,30 @@ export class LayersPanel {
       { kind: 'sep' }, cmdEntry('layer.maskReveal'), cmdEntry('layer.maskHide'),
       cmdEntry('layer.maskSelection'), cmdEntry('layer.maskApply'), cmdEntry('layer.maskDelete'),
       { kind: 'sep' }, cmdEntry('layer.clip'), cmdEntry('layer.style'),
+      cmdEntry('layer.shapeOptions'),
     ], this.app));
     return el('div', { class: 'tools' }, menu);
+  }
+
+  private filterRow(): HTMLElement {
+    const input = el('input', {
+      type: 'text', placeholder: '搜尋圖層名稱…', style: 'flex:1;min-width:0',
+    }) as HTMLInputElement;
+    on(input, 'input', () => { this.search = input.value.trim().toLowerCase(); this.refresh(); });
+    const kinds = selectControl('all', KIND_FILTERS, (v) => {
+      this.kindFilter = v;
+      this.refresh();
+    });
+    kinds.style.maxWidth = '110px';
+    return el('div', { class: 'layer-filter' }, input, kinds);
+  }
+
+  private matches(layer: Layer): boolean {
+    return layerMatchesFilter(layer, this.search, this.kindFilter);
+  }
+
+  private filterActive(): boolean {
+    return this.search !== '' || this.kindFilter !== 'all';
   }
 
   private controls(): HTMLElement {
@@ -166,6 +224,14 @@ export class LayersPanel {
       doc.editingMask = false;
       this.app.changed();
     });
+    if (layer.kind === 'shape') {
+      // Double-clicking a shape thumbnail is the quickest route to its style.
+      on(pixels, 'dblclick', (ev) => {
+        ev.stopPropagation();
+        doc.activeLayerId = layer.id;
+        runCommand(this.app, 'layer.shapeOptions');
+      });
+    }
     thumbs.append(pixels);
 
     if (layer.mask) {
@@ -194,6 +260,7 @@ export class LayersPanel {
       el('span', { text: `${Math.round(layer.opacity * 100)}%` }),
       el('span', { text: BLEND_LABELS[layer.blend] }),
       layer.kind === 'smart' ? el('span', { class: 'badge', text: '智慧' }) : null,
+      layer.kind === 'shape' ? el('span', { class: 'badge', text: '形狀' }) : null,
       smartFilters ? el('span', { class: 'badge', text: `濾鏡 ${smartFilters}` }) : null,
       layer.clipped ? el('span', { class: 'clip-mark', text: '↳ 剪裁' }) : null,
       layer.locked ? el('span', { text: '🔒' }) : null);
@@ -223,6 +290,7 @@ export class LayersPanel {
       popupMenu(row, [
         cmdEntry('layer.duplicate'), cmdEntry('layer.delete'), cmdEntry('layer.rasterize'),
         { kind: 'sep' }, cmdEntry('layer.clip'), cmdEntry('layer.style'),
+        cmdEntry('layer.shapeOptions'),
         { kind: 'sep' }, cmdEntry('smart.convert'), cmdEntry('smart.filters'), cmdEntry('smart.edit'),
         { kind: 'sep' }, cmdEntry('layer.mergeDown'),
       ], this.app, [
@@ -270,9 +338,12 @@ export class LayersPanel {
     const doc = this.app.activeDoc();
     if (!doc) return;
 
+    let shown = 0;
     const render = (layers: Layer[], into: HTMLElement): void => {
       for (let i = layers.length - 1; i >= 0; i--) {
         const layer = layers[i];
+        if (!this.matches(layer)) continue;
+        shown++;
         into.append(this.buildRow(layer, doc));
         if (layer.kind === 'group' && layer.children?.length && layer.expanded !== false) {
           const kids = el('div', { class: 'layer-children' });
@@ -282,6 +353,9 @@ export class LayersPanel {
       }
     };
     render(doc.layers, this.list);
+    if (this.filterActive() && shown === 0) {
+      this.list.append(el('div', { class: 'hint', text: '沒有符合條件的圖層。' }));
+    }
 
     const active = doc.activeLayer();
     if (active) {
