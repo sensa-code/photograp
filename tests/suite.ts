@@ -13,7 +13,11 @@ import { applyAdjustment, curveLut, defaultAdjustment } from '../src/filters/adj
 import { gaussianBlur, unsharpMask } from '../src/filters/blur';
 import { pixelate, findEdges } from '../src/filters/effects';
 import { getFilter, defaultParams } from '../src/filters/registry';
-import { Stroke, defaultBrush } from '../src/tools/stroke';
+import { Stroke, defaultBrush, brushStamp } from '../src/tools/stroke';
+import {
+  BUILTIN_PRESETS, applySettingsToOptions, createPreset, describePreset,
+  loadPresets, resetPresets, savePresets, settingsFromOptions,
+} from '../src/core/brush-presets';
 import { floodSelect } from '../src/tools/select';
 import { renderGradient, presetStops, shapePath } from '../src/tools/draw';
 import { defaultTextStyle, renderTextLayer, measureText } from '../src/core/text';
@@ -1356,6 +1360,102 @@ async function run(): Promise<void> {
     const region = contentAwareFill(img, mask, { patchSize: 5, maxWorkingSize: 128, iterations: 2 })!;
     assert(region.rect.w < size && region.rect.h < size, '工作視窗應小於整張影像');
     assert(region.rect.x <= 96 && region.rect.y <= 96, '視窗應涵蓋破洞');
+  });
+
+  // ---- brush presets ----
+  group('筆刷預設集');
+  await test('筆尖圓度會壓扁筆刷', () => {
+    const round = brushStamp(40, 1, { r: 0, g: 0, b: 0 }, 1, 0);
+    const flat = brushStamp(40, 1, { r: 0, g: 0, b: 0 }, 0.3, 0);
+    const c = flat.w / 2;
+    assert(pixel(round, c, c - 15)[3] > 200, '圓形筆刷上下應是實心');
+    assert(pixel(flat, c + 15, c)[3] > 200, '壓扁後左右仍應是實心');
+    assert(pixel(flat, c, c - 15)[3] < 40, `壓扁後上下應變空，實得 ${pixel(flat, c, c - 15)[3]}`);
+  });
+  await test('筆尖角度會旋轉筆刷', () => {
+    const turned = brushStamp(40, 1, { r: 0, g: 0, b: 0 }, 0.3, 90);
+    const c = turned.w / 2;
+    assert(pixel(turned, c, c - 15)[3] > 200, '旋轉 90 度後上下應變實心');
+    assert(pixel(turned, c + 15, c)[3] < 40, '旋轉 90 度後左右應變空');
+  });
+  await test('內建預設集齊全且數值合理', () => {
+    assert(BUILTIN_PRESETS.length >= 8, '應提供多組內建筆刷');
+    for (const p of BUILTIN_PRESETS) {
+      assert(p.builtin === true, `${p.name} 應標記為內建`);
+      assert(p.settings.size > 0, `${p.name} 尺寸應大於 0`);
+      assert(p.settings.roundness > 0 && p.settings.roundness <= 100, `${p.name} 圓度應在 1..100`);
+      assert(p.settings.hardness >= 0 && p.settings.hardness <= 100, `${p.name} 硬度應在 0..100`);
+    }
+    const calli = BUILTIN_PRESETS.find((p) => p.id === 'calligraphy')!;
+    assert(calli.settings.roundness < 50 && calli.settings.angle !== 0, '書法筆應是傾斜的扁筆尖');
+  });
+  await test('讀寫工具選項', () => {
+    const options: Record<string, unknown> = {
+      size: 44, hardness: 60, opacity: 90, flow: 55, spacing: 18,
+      smoothing: 25, scatter: 7, roundness: 40, angle: 30, sizeJitter: 12,
+      sizePressure: false, opacityPressure: true,
+    };
+    const s = settingsFromOptions(options);
+    assert(s.size === 44 && s.roundness === 40 && s.angle === 30, '數值應被讀出');
+    assert(s.sizePressure === false && s.opacityPressure === true, '布林選項應被讀出');
+
+    // The eraser has no scatter option, so applying a preset must not add one.
+    const target: Record<string, unknown> = { size: 10, hardness: 10, roundness: 100 };
+    applySettingsToOptions(s, target);
+    assert(target.size === 44 && target.roundness === 40, '存在的選項應被覆寫');
+    assert(!('scatter' in target), '工具沒有的選項不應被寫入');
+  });
+  await test('預設集描述與建立', () => {
+    const p = createPreset('測試筆刷', {
+      ...BUILTIN_PRESETS[0].settings, size: 12, hardness: 70, roundness: 50, scatter: 4,
+    });
+    assert(p.builtin === false && p.name === '測試筆刷', '自訂預設集不應標記為內建');
+    const text = describePreset(p.settings);
+    assert(text.includes('12 px') && text.includes('圓度'), `描述不正確：${text}`);
+  });
+  await test('自訂預設集可存回並讀出', () => {
+    const backup = localStorage.getItem('photograp.brushPresets.v1');
+    try {
+      localStorage.removeItem('photograp.brushPresets.v1');
+      const mine = createPreset('我的筆刷', { ...BUILTIN_PRESETS[0].settings, size: 77 });
+      // Also drop one built-in, to check hidden built-ins round-trip.
+      const list = loadPresets().filter((p) => p.id !== 'pencil');
+      savePresets([...list, mine]);
+
+      const reloaded = loadPresets();
+      const found = reloaded.find((p) => p.name === '我的筆刷');
+      assert(!!found, '自訂預設集應被讀回');
+      assert(found!.settings.size === 77, '設定內容應被保留');
+      assert(found!.builtin === false, '讀回後仍應是自訂');
+      assert(!reloaded.some((p) => p.id === 'pencil'), '被刪掉的內建筆刷不應復活');
+      assert(reloaded.some((p) => p.id === 'soft-round'), '其他內建筆刷仍應存在');
+
+      const after = resetPresets();
+      assert(after.length === BUILTIN_PRESETS.length, '恢復預設後應只剩內建筆刷');
+    } finally {
+      if (backup === null) localStorage.removeItem('photograp.brushPresets.v1');
+      else localStorage.setItem('photograp.brushPresets.v1', backup);
+    }
+  });
+  await test('預設筆刷設定包含新的筆尖參數', () => {
+    const b = defaultBrush();
+    assert(b.roundness === 1 && b.angle === 0 && b.sizeJitter === 0, '預設應為正圓、無角度、無抖動');
+  });
+  await test('扁筆尖畫出的筆觸有方向性', () => {
+    const doc = PhotoDoc.createBlank('t', 80, 80, 'transparent');
+    const layer = doc.activeLayer()!;
+    const settings = {
+      ...defaultBrush(), size: 30, hardness: 1, smoothing: 0, spacing: 5,
+      sizePressure: false, roundness: 0.2, angle: 0, color: { r: 0, g: 0, b: 0 },
+    };
+    const stroke = new Stroke(doc, layer, layer.surface!, 'pixels', settings, 'paint');
+    // A horizontal drag with a wide, flat tip lays down a thin band.
+    stroke.begin(15, 40, 1);
+    stroke.extend(65, 40, 1);
+    stroke.commit('flat');
+    const out = doc.activeLayer()!.surface!;
+    assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
+    assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
   });
 
   // ---- tools smoke test ----

@@ -350,6 +350,19 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel-tabgroup .tab-body > .panel.active { display: flex; flex: 1; }
 .panel-tabgroup .tab-body > .panel > .panel-head { display: none; }
 
+.panel-tabstrip .tab { padding: 6px 9px; }
+.panel-tabstrip .tab span:first-child { flex: none; }
+
+.brush-row .thumbs canvas {
+  width: 116px;
+  height: 34px;
+  border: 1px solid #1a1a1a;
+  border-radius: 2px;
+  flex: none;
+}
+.brush-row { grid-template-columns: 20px auto; }
+.brush-row .layer-meta { grid-column: 1 / -1; }
+
 .channel-row .thumbs { align-items: center; }
 .channel-thumb {
   width: 40px;

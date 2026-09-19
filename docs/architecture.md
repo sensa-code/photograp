@@ -246,6 +246,21 @@ interface Tool {
 2. 在 `src/tools/index.ts` 的 `TOOLS` 加入實例，並在 `TOOL_SLOTS` 指定工具列位置。
 3. 選項列、快速鍵與筆刷游標都會自動生效。
 
+### 筆尖與預設集
+
+`brushStamp()` 會在畫印章前先 `rotate(angle)` 再 `scale(1, roundness)`，
+所以同一段程式就能畫出圓筆與傾斜的扁筆；快取鍵包含形狀與顏色。
+尺寸抖動在 `dab()` 裡逐一改變印章大小，會多建幾個快取項目，
+但因為尺寸被量化到 0.5px，項目數仍然有限。
+
+`core/brush-presets.ts` 的預設集刻意用**選項列的單位**存值
+（硬度、不透明度、流量、圓度都是百分比），因此套用預設集就是把值
+直接複製進 `app.toolOptions`，不需要兩套換算。套用時會跳過工具沒有宣告的鍵，
+免得在橡皮擦的選項裡留下一個永遠用不到的 `scatter`。
+
+自訂內容存在 localStorage，格式是 `{ user, hiddenBuiltins }` 而不是整份清單，
+這樣日後新增內建筆刷時，既有使用者也看得到。
+
 ### 筆觸引擎
 
 `tools/stroke.ts` 的 `Stroke` 負責筆刷類工具：

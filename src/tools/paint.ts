@@ -37,6 +37,9 @@ function brushSettings(
     sizePressure: o.sizePressure !== false,
     opacityPressure: Boolean(o.opacityPressure),
     scatter: Number(o.scatter ?? 0),
+    roundness: Number(o.roundness ?? 100) / 100,
+    angle: Number(o.angle ?? 0),
+    sizeJitter: Number(o.sizeJitter ?? 0) / 100,
     color,
     ...overrides,
   };
@@ -105,7 +108,10 @@ export class BrushTool extends StrokeTool {
   icon = 'brush';
   override options: ToolOption[] = [
     sizeOpt(30), hardnessOpt(80), opacityOpt(), flowOpt(), spacingOpt, smoothingOpt,
+    { key: 'roundness', label: '圓度', type: 'slider', min: 5, max: 100, step: 1, default: 100, unit: '%' },
+    { key: 'angle', label: '角度', type: 'slider', min: -180, max: 180, step: 1, default: 0, unit: '°' },
     { key: 'scatter', label: '散佈', type: 'slider', min: 0, max: 100, step: 1, default: 0, unit: ' px' },
+    { key: 'sizeJitter', label: '尺寸快速變換', type: 'slider', min: 0, max: 100, step: 1, default: 0, unit: '%' },
     { key: 'sizePressure', label: '壓力控制尺寸', type: 'checkbox', default: true },
     { key: 'opacityPressure', label: '壓力控制不透明度', type: 'checkbox', default: false },
   ];
@@ -141,6 +147,8 @@ export class EraserTool extends StrokeTool {
   icon = 'eraser';
   override options: ToolOption[] = [
     sizeOpt(40), hardnessOpt(70), opacityOpt(), flowOpt(), spacingOpt, smoothingOpt,
+    { key: 'roundness', label: '圓度', type: 'slider', min: 5, max: 100, step: 1, default: 100, unit: '%' },
+    { key: 'angle', label: '角度', type: 'slider', min: -180, max: 180, step: 1, default: 0, unit: '°' },
     { key: 'sizePressure', label: '壓力控制尺寸', type: 'checkbox', default: true },
   ];
 

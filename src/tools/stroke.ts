@@ -21,21 +21,37 @@ export interface BrushSettings {
   opacityPressure: boolean;
   /** Random position jitter in pixels. */
   scatter: number;
+  /** Tip aspect ratio: 1 is round, lower values squash it. */
+  roundness: number;
+  /** Tip rotation in degrees. */
+  angle: number;
+  /** Random size variation per dab, 0..1. */
+  sizeJitter: number;
 }
 
 export const defaultBrush = (): BrushSettings => ({
   size: 30, hardness: 0.8, opacity: 1, flow: 1, spacing: 12,
   color: { r: 0, g: 0, b: 0 }, smoothing: 30,
   sizePressure: true, opacityPressure: false, scatter: 0,
+  roundness: 1, angle: 0, sizeJitter: 0,
 });
 
 const stampCache = new Map<string, Surface>();
 
-/** A single brush dab, cached by size / hardness / colour. */
-export function brushStamp(size: number, hardness: number, color: RGB): Surface {
+/**
+ * A single brush dab, cached by shape and colour. `roundness` squashes the
+ * tip and `angle` rotates it, which is what turns a round brush into a
+ * calligraphic one.
+ */
+export function brushStamp(
+  size: number, hardness: number, color: RGB, roundness = 1, angle = 0,
+): Surface {
   const s = Math.max(1, Math.round(size * 2) / 2);
   const h = clamp(hardness, 0, 1);
-  const key = `${s}|${h.toFixed(2)}|${color.r},${color.g},${color.b}`;
+  const round = clamp(roundness, 0.05, 1);
+  const rot = ((angle % 360) + 360) % 360;
+  const key = `${s}|${h.toFixed(2)}|${round.toFixed(2)}|${rot.toFixed(0)}`
+    + `|${color.r},${color.g},${color.b}`;
   const hit = stampCache.get(key);
   if (hit) return hit;
 
@@ -45,13 +61,18 @@ export function brushStamp(size: number, hardness: number, color: RGB): Surface 
   const r = s / 2;
   const { r: cr, g: cg, b: cb } = color;
 
+  surf.ctx.save();
+  surf.ctx.translate(c, c);
+  surf.ctx.rotate((rot * Math.PI) / 180);
+  surf.ctx.scale(1, round);
+
   if (h >= 0.985 && s > 2) {
     surf.ctx.fillStyle = `rgb(${cr},${cg},${cb})`;
     surf.ctx.beginPath();
-    surf.ctx.arc(c, c, r, 0, Math.PI * 2);
+    surf.ctx.arc(0, 0, r, 0, Math.PI * 2);
     surf.ctx.fill();
   } else {
-    const grad = surf.ctx.createRadialGradient(c, c, 0, c, c, Math.max(0.01, r));
+    const grad = surf.ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(0.01, r));
     const steps = 16;
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
@@ -64,10 +85,13 @@ export function brushStamp(size: number, hardness: number, color: RGB): Surface 
       grad.addColorStop(t, `rgba(${cr},${cg},${cb},${a})`);
     }
     surf.ctx.fillStyle = grad;
-    surf.ctx.fillRect(0, 0, dim, dim);
+    surf.ctx.beginPath();
+    surf.ctx.arc(0, 0, r, 0, Math.PI * 2);
+    surf.ctx.fill();
   }
+  surf.ctx.restore();
 
-  if (stampCache.size > 160) stampCache.clear();
+  if (stampCache.size > 240) stampCache.clear();
   stampCache.set(key, surf);
   return surf;
 }
@@ -139,6 +163,9 @@ export class Stroke {
     const s = this.settings;
     let size = s.size;
     if (s.sizePressure) size = Math.max(1, size * (0.25 + 0.75 * pressure));
+    if (s.sizeJitter > 0) {
+      size = Math.max(1, size * (1 + (Math.random() * 2 - 1) * s.sizeJitter));
+    }
     let alpha = s.flow;
     if (s.opacityPressure) alpha *= pressure;
     if (alpha <= 0) return;
@@ -149,7 +176,7 @@ export class Stroke {
       dy += (Math.random() * 2 - 1) * s.scatter;
     }
 
-    const stamp = brushStamp(size, s.hardness, s.color);
+    const stamp = brushStamp(size, s.hardness, s.color, s.roundness, s.angle);
     const ctx = this.scratch.ctx;
     ctx.save();
     ctx.globalAlpha = clamp(alpha, 0, 1);

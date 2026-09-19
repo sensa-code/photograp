@@ -16,6 +16,7 @@ import { ColorPanel } from './panels/color';
 import { NavigatorPanel } from './panels/navigator';
 import { ChannelsPanel } from './panels/channels';
 import { PathsPanel } from './panels/paths';
+import { BrushesPanel } from './panels/brushes';
 import { panelTabs } from './panels/group';
 import { TextEditor } from './text-editor';
 import { installShortcuts } from './shortcuts';
@@ -57,6 +58,7 @@ export class AppUI {
       { label: '圖層', icon: 'layers', root: new LayersPanel(app).root },
       { label: '色版', icon: 'channels', root: new ChannelsPanel(app).root },
       { label: '路徑', icon: 'path', root: new PathsPanel(app).root },
+      { label: '筆刷', icon: 'brush', root: new BrushesPanel(app).root },
     ]);
     const panels = el('div', { class: 'panels' },
       new NavigatorPanel(app, this.view).root,
