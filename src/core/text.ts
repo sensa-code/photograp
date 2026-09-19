@@ -34,18 +34,99 @@ export const defaultPathBinding = (pathId: string): TextPathBinding =>
 export const cssFont = (t: TextStyle): string =>
   `${t.italic ? 'italic ' : ''}${t.bold ? '700 ' : '400 '}${t.fontSize}px ${t.fontFamily}`;
 
+/**
+ * Whether a line may break between these two characters. Latin text breaks at
+ * spaces; CJK has no spaces, so it may break between any two ideographs, but
+ * not before a closing bracket or a full stop.
+ */
+const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uff60]/;
+const NO_BREAK_BEFORE = /^[\u3001\u3002\uff0c\uff0e\uff1a\uff1b\uff1f\uff01\u300d\u300f\uff09\uff3d\u3011.,:;?!)\]}\u2019\u201d]/;
+const NO_BREAK_AFTER = /[\u300c\u300e\uff08\uff3b\u3010([{\u2018\u201c]$/;
+
+function canBreakBetween(before: string, after: string): boolean {
+  if (!before || !after) return false;
+  if (NO_BREAK_BEFORE.test(after)) return false;
+  if (NO_BREAK_AFTER.test(before)) return false;
+  if (before === ' ') return true;
+  return CJK.test(before) || CJK.test(after);
+}
+
+/** Advance width of a run, including the tracking between its characters. */
+function runWidth(ctx: CanvasRenderingContext2D, run: string, letterSpacing: number): number {
+  if (!run) return 0;
+  return ctx.measureText(run).width + Math.max(0, [...run].length - 1) * letterSpacing;
+}
+
+/** A wrapped line, and whether it is the one that closes its paragraph. */
+export interface WrappedLine { text: string; endsParagraph: boolean }
+
+/**
+ * Break `text` into lines that fit `maxWidth`. Explicit newlines always break;
+ * a word longer than the whole line is split rather than allowed to overflow.
+ */
+export function wrapLines(
+  ctx: CanvasRenderingContext2D, text: string, maxWidth: number, letterSpacing: number,
+): WrappedLine[] {
+  const out: WrappedLine[] = [];
+  for (const paragraph of text.split('\n')) {
+    const chars = [...paragraph];
+    if (!chars.length) { out.push({ text: '', endsParagraph: true }); continue; }
+    let line = '';
+    let lastBreak = -1;
+    for (let i = 0; i < chars.length; i++) {
+      const next = line + chars[i];
+      if (canBreakBetween(chars[i - 1] ?? '', chars[i])) lastBreak = line.length;
+      // A space at the end of a line hangs past the margin instead of
+      // pushing the word before it down, which is how text is set.
+      if (chars[i] === ' ' || runWidth(ctx, next, letterSpacing) <= maxWidth || line === '') {
+        line = next;
+        continue;
+      }
+      if (lastBreak > 0) {
+        // Push back to the last opportunity and carry the rest to the next line.
+        out.push({ text: line.slice(0, lastBreak).replace(/ +$/, ''), endsParagraph: false });
+        line = line.slice(lastBreak) + chars[i];
+      } else {
+        // Nowhere to break: a single long word, so split it mid-word.
+        out.push({ text: line, endsParagraph: false });
+        line = chars[i];
+      }
+      lastBreak = -1;
+    }
+    // The run that reaches the end of the paragraph is never stretched.
+    out.push({ text: line, endsParagraph: true });
+  }
+  return out;
+}
+
+export function wrapText(
+  ctx: CanvasRenderingContext2D, text: string, maxWidth: number, letterSpacing: number,
+): string[] {
+  return wrapLines(ctx, text, maxWidth, letterSpacing).map((l) => l.text);
+}
+
 export interface TextMetricsResult { width: number; height: number; lines: string[] }
 
 export function measureText(t: TextStyle): TextMetricsResult {
   const probe = createSurface(4, 4);
   probe.ctx.font = cssFont(t);
-  const lines = t.text.split('\n');
-  let width = 0;
+  const lines = t.box
+    ? wrapText(probe.ctx, t.text, t.box.w, t.letterSpacing)
+    : t.text.split('\n');
+  let width = t.box ? t.box.w : 0;
   for (const line of lines) {
-    const w = probe.ctx.measureText(line).width + Math.max(0, line.length - 1) * t.letterSpacing;
+    const w = runWidth(probe.ctx, line, t.letterSpacing);
     if (w > width) width = w;
   }
   return { width, height: lines.length * t.fontSize * t.lineHeight, lines };
+}
+
+/** How many lines of a boxed layer fall outside its box. */
+export function overflowLines(t: TextStyle): number {
+  if (!t.box) return 0;
+  const { lines } = measureText(t);
+  const fits = Math.max(0, Math.floor(t.box.h / (t.fontSize * t.lineHeight)));
+  return Math.max(0, lines.length - fits);
 }
 
 /** One glyph with the advance width it occupies along the baseline. */
@@ -136,38 +217,69 @@ export function renderTextLayer(
     return;
   }
 
-  const { lines, width: blockWidth } = measureText(t);
+  const box = t.box ?? null;
+  // Paragraph type wraps into a fixed frame; point type runs on as written.
+  // Either way the lines are laid out from the surface origin and the layer
+  // offset positions the block, so dragging moves the type rather than
+  // reflowing it.
+  const lines: WrappedLine[] = box
+    ? wrapLines(ctx, t.text, box.w, t.letterSpacing)
+    : t.text.split('\n').map((text) => ({ text, endsParagraph: true }));
+  const blockWidth = box ? box.w : measureText(t).width;
   const lineH = t.fontSize * t.lineHeight;
 
-  const drawLine = (line: string, x: number, y: number, stroke: boolean): void => {
-    if (t.letterSpacing === 0) {
+  if (box) {
+    // Whatever does not fit is hidden, exactly as a type frame does it.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, box.w, box.h);
+    ctx.clip();
+  }
+
+  /** Draw one line, spreading `extra` px over the gaps between characters. */
+  const drawLine = (
+    line: string, x: number, y: number, stroke: boolean, extra: number,
+  ): void => {
+    if (t.letterSpacing === 0 && extra === 0) {
       if (stroke) ctx.strokeText(line, x, y);
       else ctx.fillText(line, x, y);
       return;
     }
+    const chars = [...line];
+    // With a single character there is no gap to stretch.
+    const pad = chars.length > 1 ? extra / (chars.length - 1) : 0;
     let cx = x;
-    for (const ch of line) {
+    for (const ch of chars) {
       if (stroke) ctx.strokeText(ch, cx, y);
       else ctx.fillText(ch, cx, y);
-      cx += ctx.measureText(ch).width + t.letterSpacing;
+      cx += ctx.measureText(ch).width + t.letterSpacing + pad;
     }
   };
 
   lines.forEach((line, i) => {
-    const w = ctx.measureText(line).width + Math.max(0, line.length - 1) * t.letterSpacing;
-    // Lines are aligned inside the block; the layer origin is the block's
-    // top-left corner, so dragging the layer moves the whole type block.
-    const x = t.align === 'center' ? (blockWidth - w) / 2 : t.align === 'right' ? blockWidth - w : 0;
     const y = (i + 1) * lineH - lineH * 0.22;
+    // Skip the lines the frame has already cut off.
+    if (box && y - lineH >= box.h) return;
+    const w = runWidth(ctx, line.text, t.letterSpacing);
+    let x = 0;
+    let extra = 0;
+    if (t.align === 'center') x = (blockWidth - w) / 2;
+    else if (t.align === 'right') x = blockWidth - w;
+    // Justification needs a frame to justify to, and the line that closes a
+    // paragraph keeps its natural width.
+    else if (t.align === 'justify' && box && !line.endsParagraph) {
+      extra = Math.max(0, blockWidth - w);
+    }
     if (t.strokeWidth > 0) {
       ctx.lineJoin = 'round';
       ctx.lineWidth = t.strokeWidth * 2;
       ctx.strokeStyle = rgbCss(t.strokeColor);
-      drawLine(line, x, y, true);
+      drawLine(line.text, x, y, true, extra);
     }
     ctx.fillStyle = rgbCss(t.color);
-    drawLine(line, x, y, false);
+    drawLine(line.text, x, y, false, extra);
   });
 
+  if (box) ctx.restore();
   layer.surface = surface;
 }

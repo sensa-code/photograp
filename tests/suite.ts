@@ -55,7 +55,8 @@ import {
   resetGradients, resolveStops, saveGradients, sortStops,
 } from '../src/core/gradients';
 import {
-  defaultPathBinding, defaultTextStyle, renderTextLayer, measureText,
+  defaultPathBinding, defaultTextStyle, renderTextLayer, measureText, overflowLines,
+  wrapLines, wrapText,
 } from '../src/core/text';
 import { createTextLayer } from '../src/core/layer';
 import { serializeDocument, loadProject } from '../src/io/files';
@@ -3632,6 +3633,7 @@ async function run(): Promise<void> {
     const tool = TOOLS.find((t) => t.id === 'text')!;
     app.options(tool.id, optionDefaults(tool));
     tool.down(pointer(doc, 150, 103));
+    tool.up?.(pointer(doc, 150, 103));
     const layer = doc.layers[doc.layers.length - 1];
     assert(layer.kind === 'text', '應新增文字圖層');
     assert(layer.text?.onPath, '點在路徑附近應綁定路徑');
@@ -3641,6 +3643,7 @@ async function run(): Promise<void> {
     const doc = app.activeDoc()!;
     const tool = TOOLS.find((t) => t.id === 'text')!;
     tool.down(pointer(doc, 150, 180));
+    tool.up?.(pointer(doc, 150, 180));
     const layer = doc.layers[doc.layers.length - 1];
     assert(!layer.text?.onPath, '離路徑太遠不應綁定');
     near(layer.x, 150, 1, '一般文字仍以點擊處為原點');
@@ -4080,6 +4083,381 @@ async function run(): Promise<void> {
     assert(layerMatchesFilter(folder, '', 'shape'), '子圖層型別命中時群組應保留');
     assert(!layerMatchesFilter(folder, 'nothing', 'all'), '全部不命中時群組應隱藏');
     assert(layerMatchesFilter(folder, '', 'group'), '群組本身應通過群組篩選');
+  });
+
+  // ---- paragraph type ----
+  group('段落文字');
+  /** A measuring context with a known font, so widths are predictable. */
+  const wrapCtx = (size = 20): CanvasRenderingContext2D => {
+    const s2 = createSurface(4, 4);
+    s2.ctx.font = `400 ${size}px monospace`;
+    return s2.ctx;
+  };
+
+  await test('英文在空格處換行', () => {
+    const ctx = wrapCtx();
+    // Exactly wide enough for two words, so the third has to move down.
+    const max = ctx.measureText('aaaa bbbb').width + 0.5;
+    const lines = wrapText(ctx, 'aaaa bbbb cccc', max, 0);
+    assert(lines.length === 2, `應換成 2 行，實得 ${lines.length}：${JSON.stringify(lines)}`);
+    assert(lines[0] === 'aaaa bbbb', `第一行應吐到第二個字，實得 ${lines[0]}`);
+    assert(lines[1] === 'cccc', `第二行應是 cccc，實得 ${lines[1]}`);
+    for (const line of lines) {
+      assert(ctx.measureText(line).width <= max, `「${line}」超過寬度`);
+    }
+  });
+  await test('行尾不留下空格', () => {
+    const ctx = wrapCtx();
+    const lines = wrapText(ctx, 'aa bb cc', ctx.measureText('aa bb').width, 0);
+    assert(!/ $/.test(lines[0]), `行尾不應有空格：「${lines[0]}」`);
+  });
+  await test('中文可以在任意兩字之間換行', () => {
+    const ctx = wrapCtx();
+    const w = ctx.measureText('測').width;
+    const lines = wrapText(ctx, '測試文字換行', w * 2.2, 0);
+    assert(lines.length === 3, `應換成 3 行，實得 ${JSON.stringify(lines)}`);
+    assert(lines[0] === '測試', `第一行應是測試，實得 ${lines[0]}`);
+  });
+  await test('標點符號不掉到行首', () => {
+    const ctx = wrapCtx();
+    const w = ctx.measureText('測').width;
+    // Without the rule the comma would start line two; it must be pulled back.
+    const lines = wrapText(ctx, '測試，文字', w * 2.2, 0);
+    for (const line of lines.slice(1)) {
+      assert(!/^[，。、]/.test(line), `行首不應是標點：${JSON.stringify(lines)}`);
+    }
+  });
+  await test('拆不開的長字會被切開而不是溢出', () => {
+    const ctx = wrapCtx();
+    const w = ctx.measureText('aa').width;
+    const lines = wrapText(ctx, 'aaaaaaaa', w, 0);
+    assert(lines.length > 1, `長字應被切開，實得 ${JSON.stringify(lines)}`);
+    for (const line of lines) {
+      assert(ctx.measureText(line).width <= w + 0.01, `「${line}」超過寬度`);
+    }
+  });
+  await test('換行字元永遠斷行並標記段尾', () => {
+    const ctx = wrapCtx();
+    const wide = ctx.measureText('aaaaaaaaaa').width;
+    const lines = wrapLines(ctx, 'aa\n\nbb', wide, 0);
+    assert(lines.length === 3, `應有 3 行，實得 ${JSON.stringify(lines)}`);
+    assert(lines[1].text === '', '空行應保留');
+    assert(lines.every((l) => l.endsParagraph), '每一行都是整段的結尾');
+  });
+  await test('被換行切開的行不算段尾', () => {
+    const ctx = wrapCtx();
+    const lines = wrapLines(ctx, 'aaaa bbbb cccc', ctx.measureText('aaaa').width * 1.2, 0);
+    assert(lines.length >= 2, '應有多行');
+    assert(!lines[0].endsParagraph, '第一行是被換行切開的');
+    assert(lines[lines.length - 1].endsParagraph, '最後一行才是段尾');
+  });
+  await test('有段落框時量測寬度就是框寬', () => {
+    const t = defaultTextStyle();
+    t.text = '測試文字換行測試';
+    t.fontSize = 20;
+    t.box = { w: 60, h: 200 };
+    const m = measureText(t);
+    assert(m.width === 60, `寬度應是 60，實得 ${m.width}`);
+    assert(m.lines.length > 1, '應已換行');
+    near(m.height, m.lines.length * 20 * t.lineHeight, 0.001, '高度應是行數乘行高');
+  });
+  await test('滿出框外的行數會被算出來', () => {
+    const t = defaultTextStyle();
+    t.text = 'a\nb\nc\nd';
+    t.fontSize = 20;
+    t.lineHeight = 1;
+    t.box = { w: 400, h: 40 };
+    assert(overflowLines(t) === 2, `四行只裝得下兩行，實得 ${overflowLines(t)}`);
+    t.box = { w: 400, h: 400 };
+    assert(overflowLines(t) === 0, '框夠大就不應溯出');
+    t.box = undefined;
+    assert(overflowLines(t) === 0, '點文字永遠不溯出');
+  });
+  await test('框外的文字會被裁掉', () => {
+    const style = defaultTextStyle();
+    style.text = 'AAAA\nBBBB\nCCCC\nDDDD';
+    style.fontSize = 20;
+    style.lineHeight = 1;
+    style.color = { r: 0, g: 0, b: 0 };
+    style.box = { w: 200, h: 40 };
+    const layer = createTextLayer('段落', 200, 200, style);
+    renderTextLayer(layer, 200, 200);
+    const rowHasInk = (y: number): boolean => {
+      const d = layer.surface!.ctx.getImageData(0, y, 200, 1).data;
+      for (let i = 3; i < d.length; i += 4) if (d[i] > 8) return true;
+      return false;
+    };
+    assert(rowHasInk(14), '第一行應要畫出來');
+    for (let y = 41; y < 200; y++) {
+      assert(!rowHasInk(y), `第 ${y} 列在框外，不應有內容`);
+    }
+  });
+  await test('齊行會把行擐到框寬', () => {
+    const make = (align: 'left' | 'justify'): Layer => {
+      const style = defaultTextStyle();
+      style.text = 'aa aa aa aa aa aa aa aa';
+      style.fontSize = 18;
+      style.align = align;
+      style.color = { r: 0, g: 0, b: 0 };
+      style.box = { w: 150, h: 200 };
+      const l = createTextLayer('段落', 260, 200, style);
+      renderTextLayer(l, 260, 200);
+      return l;
+    };
+    /** Rightmost inked column on the first line. */
+    const rightEdge = (l: Layer): number => {
+      const d = l.surface!.ctx.getImageData(0, 0, 260, 22).data;
+      let max = -1;
+      for (let y = 0; y < 22; y++) {
+        for (let x = 0; x < 260; x++) if (d[(y * 260 + x) * 4 + 3] > 8) max = Math.max(max, x);
+      }
+      return max;
+    };
+    const plain = rightEdge(make('left'));
+    const spread = rightEdge(make('justify'));
+    assert(plain > 0 && spread > plain, `齊行應更寬：${plain} → ${spread}`);
+    assert(spread <= 150, `不應超出框寬 150，實得 ${spread}`);
+  });
+  await test('段尾那一行不拉開', () => {
+    const style = defaultTextStyle();
+    // One short line that is the whole paragraph: justification must skip it.
+    style.text = 'aa';
+    style.fontSize = 18;
+    style.align = 'justify';
+    style.color = { r: 0, g: 0, b: 0 };
+    style.box = { w: 150, h: 60 };
+    const l = createTextLayer('段落', 260, 100, style);
+    renderTextLayer(l, 260, 100);
+    const d = l.surface!.ctx.getImageData(0, 0, 260, 30).data;
+    let max = -1;
+    for (let y = 0; y < 30; y++) {
+      for (let x = 0; x < 260; x++) if (d[(y * 260 + x) * 4 + 3] > 8) max = Math.max(max, x);
+    }
+    assert(max > 0 && max < 100, `單行段落應保持原寬，實得 ${max}`);
+  });
+  await test('段落框跟著圖層位置走', () => {
+    const style = defaultTextStyle();
+    style.text = 'AAAA';
+    style.fontSize = 20;
+    style.color = { r: 0, g: 0, b: 0 };
+    style.box = { w: 120, h: 40 };
+    const l = createTextLayer('段落', 200, 200, style);
+    l.x = 30;
+    l.y = 40;
+    renderTextLayer(l, 200, 200);
+    // The offset must survive the render, or a moved frame would snap back.
+    assert(l.x === 30 && l.y === 40, `圖層偏移不應被改掉，實得 ${l.x},${l.y}`);
+    const d = l.surface!.ctx.getImageData(0, 0, 200, 200).data;
+    let any = false;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 8) { any = true; break; }
+    assert(any, '應該畫出了東西');
+  });
+  await test('文字工具拖曳會做出段落框', () => {
+    const doc = PhotoDoc.createBlank('para', 300, 200, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const before = doc.layers.length;
+    const tool = TOOLS.find((t) => t.id === 'text')!;
+    tool.down(pointer(doc, 20, 30));
+    tool.move?.(pointer(doc, 180, 120, { sx: 20, sy: 30 }));
+    tool.up?.(pointer(doc, 180, 120, { sx: 20, sy: 30 }));
+    assert(doc.layers.length === before + 1, '應新增一個圖層');
+    const layer = doc.layers[doc.layers.length - 1];
+    assert(layer.kind === 'text', '應是文字圖層');
+    assert(layer.text?.box, '拖曳出來的應該有段落框');
+    assert(layer.text!.box!.w === 160 && layer.text!.box!.h === 90,
+      `框尺寸應是 160×90，實得 ${layer.text!.box!.w}×${layer.text!.box!.h}`);
+    assert(layer.x === 20 && layer.y === 30, `框應從拖曳起點開始，實得 ${layer.x},${layer.y}`);
+  });
+  await test('文字工具單擊還是點文字', () => {
+    const doc = PhotoDoc.createBlank('point', 300, 200, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const tool = TOOLS.find((t) => t.id === 'text')!;
+    tool.down(pointer(doc, 40, 50));
+    tool.up?.(pointer(doc, 41, 51, { sx: 40, sy: 50 }));
+    const layer = doc.layers[doc.layers.length - 1];
+    assert(layer.kind === 'text', '應是文字圖層');
+    assert(!layer.text?.box, '單擊不應產生段落框');
+    assert(layer.x === 40 && layer.y === 50, '點文字應落在滑鼠點擊處');
+  });
+  await test('段落文字存檔後設定不遺失', async () => {
+    const doc = PhotoDoc.createBlank('save', 120, 80, 'white');
+    const style = defaultTextStyle();
+    style.text = '測試段落';
+    style.align = 'justify';
+    style.box = { w: 90, h: 50 };
+    const layer = createTextLayer('段落', 120, 80, style);
+    renderTextLayer(layer, 120, 80);
+    doc.layers.push(layer);
+    const json = await serializeDocument(doc);
+    const back = await loadProject(json);
+    const out = back.layers.find((l) => l.kind === 'text')!;
+    assert(out.text?.box, '段落框應隨專案存下來');
+    assert(out.text!.box!.w === 90 && out.text!.box!.h === 50, '框尺寸應一致');
+    assert(out.text!.align === 'justify', '對齊方式應一致');
+  });
+
+  // ---- mixer brush ----
+  group('混色筆刷');
+  /** Run one mixer stroke across a document and return the painted layer. */
+  const mixStroke = (
+    doc: PhotoDoc, from: { x: number; y: number }, to: { x: number; y: number },
+    opts: Record<string, unknown> = {},
+  ): Layer => {
+    const tool = TOOLS.find((t) => t.id === 'mixer')!;
+    // app.options only fills in missing keys, so set the store outright:
+    // every stroke here runs with its own settings.
+    app.toolOptions[tool.id] = { ...optionDefaults(tool), size: 20, hardness: 100, ...opts };
+    tool.down(pointer(doc, from.x, from.y));
+    const steps = 12;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      tool.move?.(pointer(doc, from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t,
+        { sx: from.x, sy: from.y }));
+    }
+    tool.up?.(pointer(doc, to.x, to.y, { sx: from.x, sy: from.y }));
+    return doc.layers[doc.layers.length - 1];
+  };
+
+  await test('載滿前景色的筆刷會把顏色放下去', () => {
+    const doc = PhotoDoc.createBlank('mix', 120, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    app.foreground = { r: 220, g: 20, b: 20 };
+    const layer = mixStroke(doc, { x: 20, y: 30 }, { x: 100, y: 30 }, { mix: 0, wet: 0, flow: 100 });
+    const px = pixel(layer.surface!, 60, 30);
+    assert(px[0] > 180 && px[1] < 90, `筆畫中段應是前景紅，實得 ${px}`);
+    assert(doc.history.snapshots.some((h) => h.label === '混色筆刷'), '應記下一筆步驟');
+  });
+  await test('潮濕的筆刷會把顏色拖進空白處', () => {
+    const doc = PhotoDoc.createBlank('smear', 200, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const s2 = doc.mutableSurface(doc.layers[0]);
+    s2.ctx.fillStyle = '#1040d0';
+    s2.ctx.fillRect(0, 0, 40, 60);
+    doc.commit('底圖');
+    app.foreground = { r: 255, g: 255, b: 255 };
+    const layer = mixStroke(doc, { x: 20, y: 30 }, { x: 180, y: 30 },
+      { mix: 100, wet: 100, flow: 100 });
+    const close = pixel(layer.surface!, 55, 30);
+    const far = pixel(layer.surface!, 170, 30);
+    assert(close[2] > close[0] + 30, `剛離開藍块時應還帶著藍，實得 ${close}`);
+    assert(far[2] - far[0] < close[2] - close[0], `越拖越淡：${close} → ${far}`);
+  });
+  await test('不潮濕的筆刷不沾起任何顏色', () => {
+    const doc = PhotoDoc.createBlank('dry-mix', 200, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const s2 = doc.mutableSurface(doc.layers[0]);
+    s2.ctx.fillStyle = '#1040d0';
+    s2.ctx.fillRect(0, 0, 40, 60);
+    doc.commit('底圖');
+    app.foreground = { r: 240, g: 240, b: 40 };
+    // Mix is at the top, so every dab is whatever the bristles carry; with no
+    // wetness they never pick anything up and carry only the dipped colour.
+    const layer = mixStroke(doc, { x: 20, y: 30 }, { x: 180, y: 30 },
+      { mix: 100, wet: 0, flow: 100 });
+    const px = pixel(layer.surface!, 120, 30);
+    assert(px[0] > 200 && px[2] < 90, `應一路畫前景黃，實得 ${px}`);
+  });
+  await test('載入調低的筆刷會畫乾', () => {
+    const paintedAt = (load: number, x: number): number => {
+      const doc = PhotoDoc.createBlank('dry', 240, 60, 'white');
+      app.docs.length = 0;
+      app.addDoc(doc);
+      app.foreground = { r: 0, g: 0, b: 0 };
+      // Nothing is picked up and nothing is carried, so only the dip can mark
+      // the canvas: when it runs out the stroke has to fade.
+      const layer = mixStroke(doc, { x: 20, y: 30 }, { x: 220, y: 30 },
+        { mix: 0, wet: 0, load, flow: 100 });
+      return pixel(layer.surface!, x, 30)[0];
+    };
+    assert(paintedAt(100, 200) < 60, `載入 100% 的筆畫尾端應還是黑的，實得 ${paintedAt(100, 200)}`);
+    const dryHead = paintedAt(10, 30);
+    const dryTail = paintedAt(10, 200);
+    assert(dryHead < 120, `載入 10% 的筆畫開頭還是要有顏色，實得 ${dryHead}`);
+    assert(dryTail > dryHead + 60, `載入 10% 應明顯畫乾：${dryHead} → ${dryTail}`);
+  });
+  await test('取消重新載入時顏色會跨筆畫帶過去', () => {
+    const doc = PhotoDoc.createBlank('dirty', 240, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const s2 = doc.mutableSurface(doc.layers[0]);
+    s2.ctx.fillStyle = '#d02020';
+    s2.ctx.fillRect(0, 0, 60, 60);
+    doc.commit('底圖');
+    app.foreground = { r: 255, g: 255, b: 255 };
+    const opts = { mix: 100, wet: 100, flow: 100, reload: false };
+    // The first stroke loads red off the canvas; the second must still carry it.
+    mixStroke(doc, { x: 20, y: 30 }, { x: 50, y: 30 }, opts);
+    const layer = mixStroke(doc, { x: 160, y: 30 }, { x: 200, y: 30 }, opts);
+    const px = pixel(layer.surface!, 170, 30);
+    assert(px[0] > px[1] + 20, `第二筆應還帶著紅色，實得 ${px}`);
+  });
+  await test('重新載入時每筆都從前景色開始', () => {
+    const doc = PhotoDoc.createBlank('reload', 240, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const s2 = doc.mutableSurface(doc.layers[0]);
+    s2.ctx.fillStyle = '#d02020';
+    s2.ctx.fillRect(0, 0, 60, 60);
+    doc.commit('底圖');
+    app.foreground = { r: 20, g: 20, b: 220 };
+    const opts = { mix: 100, wet: 100, flow: 100, reload: true };
+    mixStroke(doc, { x: 20, y: 30 }, { x: 50, y: 30 }, opts);
+    const layer = mixStroke(doc, { x: 160, y: 30 }, { x: 200, y: 30 }, opts);
+    const px = pixel(layer.surface!, 170, 30);
+    assert(px[2] > px[0] + 40, `重新載入後應是前景藍，實得 ${px}`);
+  });
+  await test('取樣全部圖層會捧起下層的顏色', () => {
+    const doc = PhotoDoc.createBlank('sample', 200, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const base = doc.mutableSurface(doc.layers[0]);
+    base.ctx.fillStyle = '#10b040';
+    base.ctx.fillRect(0, 0, 60, 60);
+    const empty = createRasterLayer('空白', 200, 60);
+    doc.layers.push(empty);
+    doc.activeLayerId = empty.id;
+    doc.commit('新增空圖層');
+    app.foreground = { r: 255, g: 255, b: 255 };
+    const layer = mixStroke(doc, { x: 25, y: 30 }, { x: 170, y: 30 },
+      { mix: 100, wet: 100, flow: 100, sampleAll: true });
+    assert(layer.id === empty.id, '應畫在作用中的空圖層上');
+    const px = pixel(layer.surface!, 90, 30);
+    assert(px[3] > 40, `應畫到東西，實得 ${px}`);
+    assert(px[1] > px[0] + 20, `應捧起下層的綠，實得 ${px}`);
+  });
+  await test('不取樣全部圖層時看不到下層', () => {
+    const doc = PhotoDoc.createBlank('nosample', 200, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const base = doc.mutableSurface(doc.layers[0]);
+    base.ctx.fillStyle = '#10b040';
+    base.ctx.fillRect(0, 0, 200, 60);
+    const empty = createRasterLayer('空白', 200, 60);
+    doc.layers.push(empty);
+    doc.activeLayerId = empty.id;
+    doc.commit('新增空圖層');
+    app.foreground = { r: 250, g: 40, b: 250 };
+    const layer = mixStroke(doc, { x: 25, y: 30 }, { x: 170, y: 30 },
+      { mix: 100, wet: 100, flow: 100, sampleAll: false });
+    const px = pixel(layer.surface!, 90, 30);
+    assert(px[0] > 180 && px[2] > 180, `應只畫出前景色，實得 ${px}`);
+  });
+  await test('無法繪製的圖層不會被動到', () => {
+    const doc = PhotoDoc.createBlank('blocked', 80, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const adj = createAdjustmentLayer('調整', defaultAdjustment('brightness-contrast'));
+    doc.layers.push(adj);
+    doc.activeLayerId = adj.id;
+    doc.commit('新增調整圖層');
+    const snaps = doc.history.snapshots.length;
+    mixStroke(doc, { x: 20, y: 30 }, { x: 60, y: 30 });
+    assert(doc.history.snapshots.length === snaps, '不應留下步驟');
   });
 
   // ---- tools smoke test ----

@@ -1,6 +1,7 @@
 import type { Tool } from './types';
 import {
-  BrushTool, PencilTool, EraserTool, BlurSharpenTool, DodgeBurnTool, SmudgeTool,
+  BrushTool, PencilTool, EraserTool, MixerBrushTool, BlurSharpenTool, DodgeBurnTool,
+  SmudgeTool,
   CloneStampTool, HistoryBrushTool, PatternStampTool,
 } from './paint';
 import { MarqueeTool, LassoTool, PolygonLassoTool, MagicWandTool } from './select';
@@ -26,6 +27,7 @@ export const TOOLS: Tool[] = [
   new EyedropperTool(),
   new BrushTool(),
   new PencilTool(),
+  new MixerBrushTool(),
   new EraserTool(),
   new SpotHealingBrushTool(),
   new HealingBrushTool(),
@@ -52,7 +54,7 @@ export const TOOL_SLOTS: string[][] = [
   ['marquee', 'lasso', 'poly-lasso', 'wand'],
   ['crop', 'perspective-crop'],
   ['eyedropper'],
-  ['brush', 'pencil', 'eraser'],
+  ['brush', 'pencil', 'mixer', 'eraser'],
   ['spot-heal', 'heal'],
   ['clone', 'pattern-stamp', 'history-brush', 'smudge', 'blur-sharpen', 'dodge-burn'],
   ['bucket', 'gradient'],

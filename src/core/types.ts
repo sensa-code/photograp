@@ -106,13 +106,16 @@ export interface TextStyle {
   bold: boolean;
   italic: boolean;
   color: RGB;
-  align: 'left' | 'center' | 'right';
+  /** `justify` only means anything inside a paragraph box. */
+  align: 'left' | 'center' | 'right' | 'justify';
   lineHeight: number;
   letterSpacing: number;
   strokeWidth: number;
   strokeColor: RGB;
   /** Set to lay the type along a document path instead of in a block. */
   onPath?: TextPathBinding;
+  /** Set to wrap the type inside a fixed box instead of running on freely. */
+  box?: { w: number; h: number };
 }
 
 /** Where a type layer sits on a path. */

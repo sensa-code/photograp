@@ -1,7 +1,9 @@
 import type { App } from '../core/app';
 import type { PhotoDoc } from '../core/document';
 import type { Layer } from '../core/types';
-import { FONT_STACKS, defaultPathBinding, renderTextLayer } from '../core/text';
+import {
+  FONT_STACKS, defaultPathBinding, measureText, overflowLines, renderTextLayer,
+} from '../core/text';
 import { flattenPath } from '../core/path';
 import { el, on } from './dom';
 import { colorChip, segmentedControl, selectControl } from './modal';
@@ -34,7 +36,7 @@ export class TextEditor {
       this.app.changed();
     };
 
-    on(area, 'input', () => { t.text = area.value; rerender(); });
+    on(area, 'input', () => { t.text = area.value; rerender(); syncBoxRow(); });
 
     const fontSelect = selectControl(t.fontFamily, FONT_STACKS, (v) => {
       t.fontFamily = v; rerender();
@@ -59,6 +61,7 @@ export class TextEditor {
       { value: 'left', label: '靠左' },
       { value: 'center', label: '置中' },
       { value: 'right', label: '靠右' },
+      { value: 'justify', label: '齊行' },
     ], (v) => { t.align = v as typeof t.align; rerender(); });
 
     const color = colorChip(t.color, (c) => { t.color = c; rerender(); });
@@ -75,8 +78,11 @@ export class TextEditor {
       { value: '', label: '不沿路徑' },
       ...usable.map((path) => ({ value: path.id, label: path.name })),
     ], (v) => {
+      // A curve has one baseline, so a frame and a path are alternatives.
       t.onPath = v ? defaultPathBinding(v) : undefined;
+      if (t.onPath) t.box = undefined;
       syncPathRow();
+      syncBoxRow();
       rerender();
     });
 
@@ -110,6 +116,8 @@ export class TextEditor {
     const syncPathRow = (): void => {
       const bound = !!t.onPath;
       for (const c of [offset, shift, flipBox]) c.disabled = !bound;
+      // Turning on a frame drops the binding, so the menu has to follow.
+      pathSelect.value = t.onPath?.pathId ?? '';
       if (t.onPath) {
         offset.value = String(t.onPath.offset);
         shift.value = String(t.onPath.baselineShift);
@@ -117,6 +125,76 @@ export class TextEditor {
       }
     };
     syncPathRow();
+
+    // ---- paragraph frame ----
+    const boxCheck = el('input', { type: 'checkbox' }) as HTMLInputElement;
+    boxCheck.checked = !!t.box;
+    const boxW = el('input', {
+      type: 'number', min: 16, max: 8000, value: t.box?.w ?? 0, style: 'width:64px',
+    }) as HTMLInputElement;
+    const boxH = el('input', {
+      type: 'number', min: 16, max: 8000, value: t.box?.h ?? 0, style: 'width:64px',
+    }) as HTMLInputElement;
+    const fit = el('button', { class: 'btn', text: '符合文字' });
+    const overflow = el('span', { class: 'hint' });
+
+    const syncBoxRow = (): void => {
+      const boxed = !!t.box;
+      boxCheck.checked = boxed;
+      for (const c of [boxW, boxH]) c.disabled = !boxed;
+      fit.disabled = !boxed;
+      if (t.box) {
+        boxW.value = String(Math.round(t.box.w));
+        boxH.value = String(Math.round(t.box.h));
+      }
+      const hidden = overflowLines(t);
+      overflow.textContent = hidden > 0 ? `溢出 ${hidden} 行` : '';
+      overflow.style.color = hidden > 0 ? 'var(--warn, #e0a030)' : '';
+    };
+
+    on(boxCheck, 'change', () => {
+      if (boxCheck.checked) {
+        // Start from the size the type already occupies, so turning a point
+        // layer into a paragraph does not reflow it on the spot.
+        const m = measureText({ ...t, box: undefined });
+        const lineH = t.fontSize * t.lineHeight;
+        t.box = {
+          w: Math.max(160, Math.ceil(m.width)),
+          h: Math.max(lineH, Math.ceil(m.height)),
+        };
+        t.onPath = undefined;
+      } else {
+        t.box = undefined;
+      }
+      syncPathRow();
+      syncBoxRow();
+      rerender();
+    });
+    const readBox = (): void => {
+      if (!t.box) return;
+      t.box = {
+        w: Math.max(16, Number(boxW.value) || 16),
+        h: Math.max(16, Number(boxH.value) || 16),
+      };
+      rerender();
+      syncBoxRow();
+    };
+    on(boxW, 'input', readBox);
+    on(boxH, 'input', readBox);
+    on(fit, 'click', () => {
+      if (!t.box) return;
+      // Grow the frame down until every wrapped line is inside it.
+      t.box = { w: t.box.w, h: Math.max(16, Math.ceil(measureText(t).height)) };
+      rerender();
+      syncBoxRow();
+    });
+
+    const boxRow = el('div', { class: 'row' },
+      el('label', { class: 'checkbox' }, boxCheck, el('span', { text: '段落框' })),
+      el('span', { class: 'hint', text: '寬' }), boxW,
+      el('span', { class: 'hint', text: '高' }), boxH,
+      fit, overflow);
+    syncBoxRow();
 
     const done = el('button', { class: 'btn primary', text: '完成' });
     on(done, 'click', () => this.close(false));
@@ -129,6 +207,7 @@ export class TextEditor {
       el('div', { class: 'row' }, align, color,
         el('span', { class: 'hint', text: '字距' }), spacing,
         el('span', { class: 'hint', text: '行距' }), lineHeight),
+      boxRow,
       usable.length ? pathRow : null,
       el('div', { class: 'row', style: 'justify-content:flex-end' }, cancel, done));
 

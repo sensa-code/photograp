@@ -1,6 +1,6 @@
 import type { App } from '../core/app';
 import type { PhotoDoc } from '../core/document';
-import type { GradientStop, Layer } from '../core/types';
+import type { GradientStop, Layer, TextStyle } from '../core/types';
 import type { PaintTarget } from '../core/document';
 import { createSurface, type Surface } from '../core/surface';
 import { clamp, normalizeRect } from '../core/geometry';
@@ -16,7 +16,9 @@ import {
   defaultShapeStyle, renderShapeLayer, shapeToVectorPath, type ShapeKind as VectorShapeKind,
 } from '../core/shape';
 import type { Layer as LayerType } from '../core/types';
-import { defaultPathBinding, defaultTextStyle, renderTextLayer } from '../core/text';
+import {
+  defaultPathBinding, defaultTextStyle, overflowLines, renderTextLayer,
+} from '../core/text';
 import { closestOnPath } from '../core/path';
 import { floodSelect } from './select';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
@@ -602,33 +604,54 @@ export class TextTool implements Tool {
   cursor = 'text';
   options: ToolOption[] = [];
 
-  down(e: ToolPointer): void {
-    // Clicking an existing type layer reopens it for editing.
+  /** Set while dragging out a paragraph frame. */
+  private start: { x: number; y: number } | null = null;
+  private end = { x: 0, y: 0 };
+  /** Last overflow count, kept because the overlay redraws far more often
+   *  than the type changes and re-wrapping is not free. */
+  private overflow: { key: string; lines: number } | null = null;
+
+  /** How many lines of `t` fall outside its frame, from cache when it can. */
+  private overflowOf(t: TextStyle): number {
+    const key = `${t.text}\u0000${t.box?.w}x${t.box?.h}\u0000${t.fontSize}`
+      + `\u0000${t.lineHeight}\u0000${t.letterSpacing}\u0000${t.fontFamily}`
+      + `\u0000${t.bold}${t.italic}`;
+    if (this.overflow?.key !== key) this.overflow = { key, lines: overflowLines(t) };
+    return this.overflow.lines;
+  }
+
+  /** The type layer under the pointer, if its glyphs cover that pixel. */
+  private layerAt(e: ToolPointer): Layer | null {
     for (let i = e.doc.layers.length - 1; i >= 0; i--) {
       const l = e.doc.layers[i];
       if (l.kind !== 'text' || !l.visible || !l.surface) continue;
       const lx = Math.floor(e.x - l.x), ly = Math.floor(e.y - l.y);
       if (lx < 0 || ly < 0 || lx >= l.surface.w || ly >= l.surface.h) continue;
-      if (l.surface.ctx.getImageData(lx, ly, 1, 1).data[3] > 8) {
-        e.doc.activeLayerId = l.id;
-        textEditorHook?.(l, e.doc, e.app);
-        e.app.changed();
-        return;
-      }
+      if (l.surface.ctx.getImageData(lx, ly, 1, 1).data[3] > 8) return l;
     }
+    return null;
+  }
+
+  /** Create a type layer at `x,y`; `box` makes it a paragraph frame. */
+  private create(e: ToolPointer, x: number, y: number, box: { w: number; h: number } | null): void {
     const style = defaultTextStyle();
     style.color = { ...e.app.foreground };
     style.text = '';
-    // Clicking on the active path starts type that runs along it, the way
-    // Photoshop's type tool does when the cursor is over a path.
-    const path = e.doc.activePath();
-    const near = path ? closestOnPath(path, { x: e.x, y: e.y }) : null;
-    if (path && near && near.distance <= 10 / e.zoom) {
-      style.onPath = { ...defaultPathBinding(path.id), offset: near.along };
+    if (box) {
+      style.box = box;
+    } else {
+      // Clicking on the active path starts type that runs along it, the way
+      // Photoshop's type tool does when the cursor is over a path. A frame
+      // and a path are alternatives, so only point type looks for one.
+      const path = e.doc.activePath();
+      const near = path ? closestOnPath(path, { x, y }) : null;
+      if (path && near && near.distance <= 10 / e.zoom) {
+        style.onPath = { ...defaultPathBinding(path.id), offset: near.along };
+      }
     }
-    const layer = createTextLayer('文字', e.doc.width, e.doc.height, style);
-    layer.x = Math.round(e.x);
-    layer.y = Math.round(e.y);
+    const layer = createTextLayer(box ? '段落文字' : '文字', e.doc.width, e.doc.height, style);
+    layer.x = Math.round(x);
+    layer.y = Math.round(y);
     e.doc.insertLayerAbove(layer, e.doc.activeLayerId);
     renderTextLayer(layer, e.doc.width, e.doc.height, e.doc.paths);
     e.doc.commit('新增文字圖層');
@@ -636,6 +659,86 @@ export class TextTool implements Tool {
     e.app.changed();
   }
 
-  move(): void { /* click only */ }
-  up(): void { /* click only */ }
+  down(e: ToolPointer): void {
+    // Clicking an existing type layer reopens it for editing.
+    const hit = this.layerAt(e);
+    if (hit) {
+      e.doc.activeLayerId = hit.id;
+      textEditorHook?.(hit, e.doc, e.app);
+      e.app.changed();
+      return;
+    }
+    // Anywhere else, a click makes point type and a drag makes a frame; which
+    // one it is only becomes clear on release.
+    this.start = { x: e.x, y: e.y };
+    this.end = { x: e.x, y: e.y };
+  }
+
+  move(e: ToolPointer): void {
+    if (!this.start) return;
+    this.end = { x: e.x, y: e.y };
+    e.app.changed();
+  }
+
+  up(e: ToolPointer): void {
+    const start = this.start;
+    this.start = null;
+    if (!start) return;
+    const r = normalizeRect(start, this.end);
+    // A frame needs room for at least one line; below that it was a click.
+    const dragged = r.w >= 8 && r.h >= 8;
+    e.app.changed();
+    if (dragged) this.create(e, r.x, r.y, { w: Math.round(r.w), h: Math.round(r.h) });
+    else this.create(e, start.x, start.y, null);
+  }
+
+  drawOverlay(o: OverlayPaint): void {
+    const rects: { x: number; y: number; w: number; h: number; live: boolean }[] = [];
+    if (this.start) {
+      const r = normalizeRect(this.start, this.end);
+      rects.push({ ...r, live: true });
+    }
+    // The frame of the selected paragraph layer, so its bounds stay visible
+    // even when the type does not reach them.
+    const active = o.doc.activeLayer();
+    if (active?.kind === 'text' && active.text?.box) {
+      const b = active.text.box;
+      rects.push({ x: active.x, y: active.y, w: b.w, h: b.h, live: false });
+    }
+    if (!rects.length) return;
+
+    const { ctx, zoom } = o;
+    ctx.save();
+    ctx.lineWidth = 1 / zoom;
+    for (const r of rects) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.strokeStyle = r.live ? '#ffffff' : 'rgba(255,255,255,0.75)';
+      ctx.setLineDash([5 / zoom, 4 / zoom]);
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.setLineDash([]);
+    }
+    // Photoshop's overflow marker: a cross in the bottom-right handle when
+    // there is more type than the frame can show.
+    if (active?.kind === 'text' && active.text?.box && this.overflowOf(active.text) > 0) {
+      const b = active.text.box;
+      const s = 7 / zoom;
+      const x = active.x + b.w - s / 2, y = active.y + b.h - s / 2;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(x, y, s, s);
+      ctx.strokeStyle = '#c0392b';
+      ctx.beginPath();
+      ctx.moveTo(x + 1.5 / zoom, y + 1.5 / zoom);
+      ctx.lineTo(x + s - 1.5 / zoom, y + s - 1.5 / zoom);
+      ctx.moveTo(x + s - 1.5 / zoom, y + 1.5 / zoom);
+      ctx.lineTo(x + 1.5 / zoom, y + s - 1.5 / zoom);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  cancel(app: App): void {
+    this.start = null;
+    app.changed();
+  }
 }

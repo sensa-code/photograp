@@ -4,7 +4,7 @@ import type { Layer } from '../core/types';
 import type { Surface } from '../core/surface';
 import { cloneSurface, createSurface } from '../core/surface';
 import { clamp } from '../core/geometry';
-import { luminance, type RGB } from '../core/color';
+import { luminance, rgbCss, rgbToHex, type RGB } from '../core/color';
 import { gaussianBlur } from '../filters/blur';
 import { convolve } from '../filters/effects';
 import { brushStamp, Stroke, type BrushSettings } from './stroke';
@@ -452,6 +452,186 @@ export class SmudgeTool extends RetouchTool {
         this.ds!.applyPatch(patch, reg.px, reg.py, radius, hardness, strength);
       }
       this.prev = { x, y };
+    };
+  }
+}
+
+/**
+ * Mean colour under a dab, weighted by coverage so transparent pixels do not
+ * drag the average toward black. `merged` stands in wherever the layer itself
+ * is empty, which is what sampling every layer means for a mixing brush.
+ */
+function averageUnder(
+  work: Surface, merged: Surface | null, offX: number, offY: number,
+  x: number, y: number, radius: number,
+): { rgb: RGB; coverage: number } | null {
+  const x0 = Math.max(0, Math.floor(x - radius)), y0 = Math.max(0, Math.floor(y - radius));
+  const x1 = Math.min(work.w, Math.ceil(x + radius)), y1 = Math.min(work.h, Math.ceil(y + radius));
+  if (x1 <= x0 || y1 <= y0) return null;
+  const w = x1 - x0, h = y1 - y0;
+  const d = work.ctx.getImageData(x0, y0, w, h).data;
+  // Reading past the edge of a canvas is legal and yields transparent pixels,
+  // so the merged patch needs no clamping of its own.
+  const m = merged ? merged.ctx.getImageData(x0 + offX, y0 + offY, w, h).data : null;
+  const r2 = radius * radius;
+  let sr = 0, sg = 0, sb = 0, sa = 0, n = 0;
+  for (let yy = 0; yy < h; yy++) {
+    const dy = y0 + yy + 0.5 - y;
+    for (let xx = 0; xx < w; xx++) {
+      const dx = x0 + xx + 0.5 - x;
+      if (dx * dx + dy * dy > r2) continue;
+      n++;
+      const i = (yy * w + xx) * 4;
+      const src = m && d[i + 3] === 0 ? m : d;
+      const a = src[i + 3] / 255;
+      if (a === 0) continue;
+      sr += src[i] * a;
+      sg += src[i + 1] * a;
+      sb += src[i + 2] * a;
+      sa += a;
+    }
+  }
+  if (!n || sa <= 0) return null;
+  return { rgb: { r: sr / sa, g: sg / sa, b: sb / sa }, coverage: sa / n };
+}
+
+const mixTo = (a: number, b: number, t: number): number => a + (b - a) * t;
+
+/**
+ * Mixer Brush. The bristles hold paint that both goes down and gets picked
+ * up, so a stroke blends into what is already on the canvas instead of
+ * covering it. Three sliders shape that exchange: `潮濕` is how much colour
+ * the bristles take on from the canvas, `混合` how much of what they are
+ * carrying goes down instead of the colour the brush was dipped in, and
+ * `載入` how long that dip lasts before the stroke runs dry.
+ *
+ * The smearing comes from the overlap between dabs: each one samples mostly
+ * the paint the one before it left, so a colour travels for a good part of a
+ * brush width before the canvas underneath washes it out.
+ */
+export class MixerBrushTool extends RetouchTool {
+  id = 'mixer';
+  name = '混色筆刷工具';
+  shortcut = 'b';
+  icon = 'mixer';
+  override options: ToolOption[] = [
+    sizeOpt(60), hardnessOpt(40),
+    { key: 'wet', label: '潮濕', type: 'slider', min: 0, max: 100, step: 1, default: 50, unit: '%' },
+    { key: 'load', label: '載入', type: 'slider', min: 0, max: 100, step: 1, default: 60, unit: '%' },
+    { key: 'mix', label: '混合', type: 'slider', min: 0, max: 100, step: 1, default: 60, unit: '%' },
+    flowOpt(80),
+    { key: 'reload', label: '每筆載入', type: 'checkbox', default: true },
+    { key: 'sampleAll', label: '取樣全部圖層', type: 'checkbox', default: false },
+    {
+      key: 'clean', label: '載入筆刷', type: 'button',
+      onClick: (app: App): void => {
+        this.paint = { ...app.foreground };
+        this.amount = 1;
+        app.status(`混色筆刷已載入 ${rgbToHex(this.loaded())}`);
+      },
+    },
+  ];
+
+  /** The colour the brush was dipped in, what is on the bristles now, and
+   *  how much of the dipped paint is left. */
+  private own: RGB = { r: 255, g: 255, b: 255 };
+  private paint: RGB = { r: 255, g: 255, b: 255 };
+  private amount = 1;
+  private merged: Surface | null = null;
+
+  protected label(): string { return '混色筆刷'; }
+
+  override down(e: ToolPointer): void {
+    const o = e.app.toolOptions[this.id] ?? {};
+    // A reloaded brush starts each stroke full of the foreground colour; left
+    // dirty it carries whatever it picked up last time, which is how you keep
+    // dragging one colour across several strokes.
+    this.own = { ...e.app.foreground };
+    if (o.reload !== false || this.amount <= 0.002) {
+      this.paint = { ...e.app.foreground };
+      this.amount = 1;
+    }
+    this.merged = o.sampleAll ? e.doc.composite() : null;
+    super.down(e);
+  }
+
+  override up(e: ToolPointer): void {
+    super.up(e);
+    this.merged = null;
+    // With reloading off the brush keeps whatever it picked up, and nothing
+    // on screen says what that is, so the status bar does.
+    if (e.app.toolOptions[this.id]?.reload === false) {
+      e.app.status(
+        `筆刷上的顏色 ${rgbToHex(this.loaded())}，剩餘顏料 ${Math.round(this.amount * 100)}%`,
+      );
+    }
+  }
+
+  override cancel(app: App): void {
+    super.cancel(app);
+    this.merged = null;
+  }
+
+  protected patchFn(e: ToolPointer): PatchFn {
+    const o = e.app.toolOptions[this.id] ?? {};
+    const wet = clamp(Number(o.wet ?? 50) / 100, 0, 1);
+    const mix = clamp(Number(o.mix ?? 60) / 100, 0, 1);
+    const flow = clamp(Number(o.flow ?? 80) / 100, 0, 1);
+    const hardness = Number(o.hardness ?? 40) / 100;
+    // `load` is the share of paint still on the brush twenty dabs in: at 100%
+    // it never runs dry, and the lower it goes the sooner the stroke fades.
+    const dry = Math.pow(clamp(Number(o.load ?? 60) / 100, 0.002, 1), 1 / 20);
+
+    return (work, x, y, radius) => {
+      const reg = patchRegion(work, x, y, radius);
+      if (!reg) return;
+      const ds = this.ds;
+      if (!ds) return;
+      const under = averageUnder(work, this.merged, ds.offX, ds.offY, x, y, radius);
+      const canvas = under && under.coverage > 0.004 ? under.rgb : null;
+
+      // The bristles touch down and take colour on. Even a soaking brush only
+      // takes half the colour under it in one dab: what it keeps of the last
+      // one is the paint it has left to smear.
+      if (canvas) {
+        const t = wet * 0.5 * under!.coverage;
+        this.paint = {
+          r: mixTo(this.paint.r, canvas.r, t),
+          g: mixTo(this.paint.g, canvas.g, t),
+          b: mixTo(this.paint.b, canvas.b, t),
+        };
+      }
+
+      // Then they leave paint: the colour the brush was dipped in, replaced by
+      // the colour it is carrying as `mix` rises and as the dip runs out. That
+      // is why a dry brush at a high mix keeps smearing but stops colouring.
+      const ownShare = (1 - mix) * this.amount;
+      const deposit = {
+        r: mixTo(this.paint.r, this.own.r, ownShare),
+        g: mixTo(this.paint.g, this.own.g, ownShare),
+        b: mixTo(this.paint.b, this.own.b, ownShare),
+      };
+      const alpha = flow * (mix + (1 - mix) * this.amount);
+      if (alpha > 0.002) {
+        const patch = createSurface(reg.w, reg.h);
+        patch.ctx.fillStyle = rgbCss({
+          r: Math.round(clamp(deposit.r, 0, 255)),
+          g: Math.round(clamp(deposit.g, 0, 255)),
+          b: Math.round(clamp(deposit.b, 0, 255)),
+        });
+        patch.ctx.fillRect(0, 0, reg.w, reg.h);
+        ds.applyPatch(patch, reg.px, reg.py, radius, hardness, alpha);
+      }
+      this.amount *= dry;
+    };
+  }
+
+  /** The colour currently on the bristles, rounded to whole channels. */
+  private loaded(): RGB {
+    return {
+      r: Math.round(clamp(this.paint.r, 0, 255)),
+      g: Math.round(clamp(this.paint.g, 0, 255)),
+      b: Math.round(clamp(this.paint.b, 0, 255)),
     };
   }
 }
