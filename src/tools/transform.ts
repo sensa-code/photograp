@@ -1,6 +1,7 @@
 import type { App } from '../core/app';
 import type { Layer } from '../core/types';
 import { createSurface, opaqueBounds, type Surface } from '../core/surface';
+import { renderSmartLayer } from '../core/smart';
 import { clamp, type Rect } from '../core/geometry';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
@@ -16,6 +17,8 @@ interface TransformState {
   sy: number;
   angle: number;
   preview: Surface;
+  /** Smart objects re-render from their source instead of baking pixels. */
+  smart: boolean;
 }
 
 /** Free Transform: scale, rotate and flip the active layer interactively. */
@@ -45,16 +48,29 @@ export class TransformTool implements Tool {
       app.toast('請先選擇一個可變形的點陣圖層', 'error');
       return false;
     }
-    const bounds = opaqueBounds(layer.surface) ?? { x: 0, y: 0, w: layer.surface.w, h: layer.surface.h };
-    this.state = {
-      layer,
-      source: layer.surface,
-      src: bounds,
-      cx: layer.x + bounds.x + bounds.w / 2,
-      cy: layer.y + bounds.y + bounds.h / 2,
-      sx: 1, sy: 1, angle: 0,
-      preview: createSurface(layer.surface.w, layer.surface.h),
-    };
+    if (layer.kind === 'smart' && layer.smart) {
+      const so = layer.smart;
+      this.state = {
+        layer,
+        source: so.source,
+        src: { x: 0, y: 0, w: so.sourceWidth, h: so.sourceHeight },
+        cx: so.cx, cy: so.cy, sx: so.scaleX, sy: so.scaleY, angle: so.angle,
+        preview: createSurface(layer.surface.w, layer.surface.h),
+        smart: true,
+      };
+    } else {
+      const bounds = opaqueBounds(layer.surface) ?? { x: 0, y: 0, w: layer.surface.w, h: layer.surface.h };
+      this.state = {
+        layer,
+        source: layer.surface,
+        src: bounds,
+        cx: layer.x + bounds.x + bounds.w / 2,
+        cy: layer.y + bounds.y + bounds.h / 2,
+        sx: 1, sy: 1, angle: 0,
+        preview: createSurface(layer.surface.w, layer.surface.h),
+        smart: false,
+      };
+    }
     this.render(app);
     doc.livePreview = { layerId: layer.id, surface: this.state.preview, isMask: false };
     app.events.emit('options-changed', undefined);
@@ -209,12 +225,21 @@ export class TransformTool implements Tool {
     const s = this.state;
     if (!doc || !s) return;
     doc.livePreview = null;
-    const target = doc.mutableSurface(s.layer);
-    target.ctx.clearRect(0, 0, target.w, target.h);
-    target.ctx.drawImage(s.preview.canvas, 0, 0);
+    if (s.smart && s.layer.smart) {
+      // Write the placement back; the pixels come from the untouched source.
+      s.layer.smart = {
+        ...s.layer.smart,
+        cx: s.cx, cy: s.cy, scaleX: s.sx, scaleY: s.sy, angle: s.angle,
+      };
+      renderSmartLayer(s.layer, doc.width, doc.height);
+    } else {
+      const target = doc.mutableSurface(s.layer);
+      target.ctx.clearRect(0, 0, target.w, target.h);
+      target.ctx.drawImage(s.preview.canvas, 0, 0);
+    }
     this.state = null;
     this.drag = null;
-    doc.commit('任意變形');
+    doc.commit(s.smart ? '智慧型物件變形' : '任意變形');
     app.events.emit('options-changed', undefined);
     app.changed();
   }

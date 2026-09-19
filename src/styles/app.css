@@ -327,6 +327,37 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel-head .caret { color: var(--text-dim); transition: transform .12s; }
 .panel.collapsed .panel-head .caret { transform: rotate(-90deg); }
 
+/* tabbed panel group */
+
+.panel-tabgroup { min-height: 300px; }
+.panel-tabstrip { gap: 0; padding: 0; }
+.panel-tabstrip .tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-weight: 600;
+}
+.panel-tabstrip .tab:hover { color: var(--text-bright); background: var(--bg-panel-alt); }
+.panel-tabstrip .tab.active { color: var(--text-bright); border-bottom-color: var(--accent); }
+.panel-tabgroup .tab-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.panel-tabgroup .tab-body > .panel { display: none; border-bottom: none; }
+.panel-tabgroup .tab-body > .panel.active { display: flex; flex: 1; }
+.panel-tabgroup .tab-body > .panel > .panel-head { display: none; }
+
+.channel-row .thumbs { align-items: center; }
+.channel-thumb {
+  width: 40px;
+  height: 28px;
+  border: 1px solid #1a1a1a;
+  flex: none;
+}
+
 /* layers */
 
 .layer-row {
@@ -369,6 +400,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .layer-sub { color: var(--text-dim); font-size: 11px; display: flex; gap: 6px; }
 .layer-row.active .layer-sub { color: #cfe0ff; }
 .layer-row .clip-mark { color: var(--text-dim); font-size: 11px; }
+.layer-sub .badge {
+  background: var(--accent-dim);
+  color: #e8f1ff;
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+.layer-row.active .layer-sub .badge { background: #1d4a86; }
 .layer-children { margin-left: 14px; border-left: 1px dotted var(--line); padding-left: 4px; }
 
 .layer-controls {

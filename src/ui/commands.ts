@@ -23,15 +23,10 @@ import {
   shortcutsDialog, strokeDialog,
 } from './dialogs/document';
 import { adjustmentDialog, filterDialog, repeatLastFilter, applyAdjustmentNow } from './dialogs/pixel-op';
+import { cmd, type Cmd as CmdType } from './command-types';
+import { VECTOR_COMMANDS } from './commands-vector';
 
-export interface Cmd {
-  id: string;
-  label: string;
-  shortcut?: string;
-  run: (app: App) => void | Promise<void>;
-  enabled?: (app: App) => boolean;
-  checked?: (app: App) => boolean;
-}
+export type { Cmd } from './command-types';
 
 const hasDoc = (app: App): boolean => app.activeDoc() !== null;
 const hasSelection = (app: App): boolean => app.activeDoc()?.selection.active ?? false;
@@ -291,7 +286,7 @@ function rotateCanvas(app: App, deg: 90 | -90 | 180): void {
     if (deg === 90) { ctx.translate(w, 0); ctx.rotate(Math.PI / 2); }
     else if (deg === -90) { ctx.translate(0, h); ctx.rotate(-Math.PI / 2); }
     else { ctx.translate(w, h); ctx.rotate(Math.PI); }
-  });
+  }, deg === 90 ? 'rot90' : deg === -90 ? 'rot-90' : 'rot180');
   doc.commit(`旋轉版面 ${deg}°`);
   app.changed();
   app.events.emit('view-changed', undefined);
@@ -304,7 +299,7 @@ function flipCanvas(app: App, axis: 'h' | 'v'): void {
   doc.transformAll(doc.width, doc.height, (ctx) => {
     if (axis === 'h') { ctx.translate(doc.width, 0); ctx.scale(-1, 1); }
     else { ctx.translate(0, doc.height); ctx.scale(1, -1); }
-  });
+  }, axis === 'h' ? 'flipH' : 'flipV');
   doc.commit(axis === 'h' ? '水平翻轉版面' : '垂直翻轉版面');
   app.changed();
 }
@@ -387,14 +382,7 @@ function selectionFromLayerAlpha(app: App): void {
 
 // ---- command registry ------------------------------------------------------
 
-function cmd(
-  id: string, label: string, run: Cmd['run'],
-  extra: Partial<Omit<Cmd, 'id' | 'label' | 'run'>> = {},
-): Cmd {
-  return { id, label, run, ...extra };
-}
-
-export const COMMANDS: Cmd[] = [
+export const COMMANDS: CmdType[] = [
   // ---- file ----
   cmd('file.new', '開新檔案…', (a) => newDocumentDialog(a), { shortcut: 'Ctrl+N' }),
   cmd('file.open', '開啟舊檔…', (a) => openFiles(a, false), { shortcut: 'Ctrl+O' }),
@@ -636,11 +624,13 @@ for (const f of FILTERS) {
   }, { enabled: hasRaster }));
 }
 
+COMMANDS.push(...VECTOR_COMMANDS);
+
 const commandMap = new Map(COMMANDS.map((c) => [c.id, c]));
-export const getCommand = (id: string): Cmd | undefined => commandMap.get(id);
+export const getCommand = (id: string): CmdType | undefined => commandMap.get(id);
 
 /** Register a command that needs a live UI object (e.g. the canvas view). */
-export function registerCommand(c: Cmd): void {
+export function registerCommand(c: CmdType): void {
   const existing = COMMANDS.findIndex((x) => x.id === c.id);
   if (existing >= 0) COMMANDS.splice(existing, 1, c);
   else COMMANDS.push(c);

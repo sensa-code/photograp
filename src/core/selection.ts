@@ -11,6 +11,7 @@ export class Selection {
   mask: Uint8Array | null = null;
   private cachedBounds: Rect | null | undefined = undefined;
   private cachedPath: Path2D | null | undefined = undefined;
+  private cachedLoops: { x: number; y: number }[][] | undefined = undefined;
 
   constructor(public width: number, public height: number) {}
 
@@ -22,7 +23,11 @@ export class Selection {
     return s;
   }
 
-  invalidate(): void { this.cachedBounds = undefined; this.cachedPath = undefined; }
+  invalidate(): void {
+    this.cachedBounds = undefined;
+    this.cachedPath = undefined;
+    this.cachedLoops = undefined;
+  }
 
   clear(): void { this.mask = null; this.invalidate(); }
 
@@ -111,8 +116,24 @@ export class Selection {
   /** Chained boundary loops used to draw the animated selection border. */
   outline(): Path2D | null {
     if (this.cachedPath !== undefined) return this.cachedPath;
-    this.cachedPath = this.mask ? traceOutline(this.mask, this.width, this.height) : null;
+    if (!this.mask) return (this.cachedPath = null);
+    const path = new Path2D();
+    for (const loop of this.loops()) {
+      path.moveTo(loop[0].x, loop[0].y);
+      for (let i = 1; i < loop.length; i++) path.lineTo(loop[i].x, loop[i].y);
+      path.closePath();
+    }
+    this.cachedPath = path;
     return this.cachedPath;
+  }
+
+  /** The same boundary, as polygon point loops (used to build work paths). */
+  loops(): { x: number; y: number }[][] {
+    if (!this.mask) return [];
+    if (this.cachedLoops === undefined) {
+      this.cachedLoops = traceLoops(this.mask, this.width, this.height);
+    }
+    return this.cachedLoops;
   }
 
   feather(radius: number): void {
@@ -269,9 +290,10 @@ function morph(src: Uint8Array, w: number, h: number, r: number, dilate: boolean
 
 /**
  * Walk the boundary between selected (>=128) and unselected pixels and chain
- * the unit edges into closed loops, so the border strokes as a dashed line.
+ * the unit edges into closed loops, so the border strokes as a dashed line
+ * and can also be converted into a vector work path.
  */
-function traceOutline(mask: Uint8Array, w: number, h: number): Path2D {
+export function traceLoops(mask: Uint8Array, w: number, h: number): { x: number; y: number }[][] {
   const inside = (x: number, y: number): boolean =>
     x >= 0 && y >= 0 && x < w && y < h && mask[y * w + x] >= 128;
 
@@ -296,12 +318,12 @@ function traceOutline(mask: Uint8Array, w: number, h: number): Path2D {
   }
 
   const used = new Uint8Array(edges.length / 4);
-  const path = new Path2D();
+  const loops: { x: number; y: number }[][] = [];
   for (let i = 0; i < edges.length; i += 4) {
     if (used[i / 4]) continue;
     used[i / 4] = 1;
     const sx = edges[i], sy = edges[i + 1];
-    path.moveTo(sx, sy);
+    const loop: { x: number; y: number }[] = [{ x: sx, y: sy }];
     let cx = edges[i + 2], cy = edges[i + 3];
     let dx = cx - sx, dy = cy - sy;
     let guard = 0;
@@ -322,9 +344,13 @@ function traceOutline(mask: Uint8Array, w: number, h: number): Path2D {
       const nx = edges[next + 2], ny = edges[next + 3];
       dx = nx - cx; dy = ny - cy;
       cx = nx; cy = ny;
-      path.lineTo(cx, cy);
+      loop.push({ x: cx, y: cy });
     }
-    path.closePath();
+    // The walk ends back on the start point; drop that duplicate so the loop
+    // is a plain polygon (callers close it themselves).
+    const tail = loop[loop.length - 1];
+    if (loop.length > 1 && tail.x === loop[0].x && tail.y === loop[0].y) loop.pop();
+    if (loop.length > 2) loops.push(loop);
   }
-  return path;
+  return loops;
 }

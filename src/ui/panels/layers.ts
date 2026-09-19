@@ -189,9 +189,12 @@ export class LayersPanel {
       thumbs.append(maskCanvas);
     }
 
+    const smartFilters = layer.smart?.filters.filter((f) => f.enabled).length ?? 0;
     const sub = el('div', { class: 'layer-sub' },
       el('span', { text: `${Math.round(layer.opacity * 100)}%` }),
       el('span', { text: BLEND_LABELS[layer.blend] }),
+      layer.kind === 'smart' ? el('span', { class: 'badge', text: '智慧' }) : null,
+      smartFilters ? el('span', { class: 'badge', text: `濾鏡 ${smartFilters}` }) : null,
       layer.clipped ? el('span', { class: 'clip-mark', text: '↳ 剪裁' }) : null,
       layer.locked ? el('span', { text: '🔒' }) : null);
 
@@ -220,6 +223,7 @@ export class LayersPanel {
       popupMenu(row, [
         cmdEntry('layer.duplicate'), cmdEntry('layer.delete'), cmdEntry('layer.rasterize'),
         { kind: 'sep' }, cmdEntry('layer.clip'), cmdEntry('layer.style'),
+        { kind: 'sep' }, cmdEntry('smart.convert'), cmdEntry('smart.filters'), cmdEntry('smart.edit'),
         { kind: 'sep' }, cmdEntry('layer.mergeDown'),
       ], this.app, [
         {

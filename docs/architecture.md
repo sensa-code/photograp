@@ -11,7 +11,7 @@ main.ts
        ├─ ui/toolbar.ts    工具列與前景/背景色
        ├─ ui/optionsbar.ts 依作用中工具的 options 宣告自動產生控制項
        ├─ ui/canvas-view.ts 畫布視埠：座標轉換、指標事件、疊加層繪製
-       └─ ui/panels/*      導覽器、顏色、步驟記錄、圖層
+       └─ ui/panels/*      導覽器、顏色、步驟記錄、圖層／色版／路徑頁籤群組
 core/                      與 DOM UI 無關的文件模型
 tools/                     工具實作，只依賴 core
 filters/                   純函式：輸入 ImageData，就地修改
@@ -29,6 +29,8 @@ UI 透過 `core/app.ts` 的 `App` 單例取得狀態，並以 `Emitter` 發送�
 - `meta`：名稱、寬高、dpi
 - `layers`：由下而上的圖層陣列（群組的 `children` 同樣由下而上）
 - `selection`：`Selection` 實例
+- `paths` / `activePathId`：具名向量路徑
+- `channels` / `channelView`：Alpha 色版與目前檢視的色版
 - `history`：`History` 快照堆疊
 - `livePreview`：工具進行中的暫時畫面
 
@@ -79,8 +81,54 @@ UI 透過 `core/app.ts` 的 `App` 單例取得狀態，並以 `Emitter` 發送�
 
 - 幾何選取先畫成 `Path2D` 再用 `rasterizePath()` 光柵化，因此自帶消除鋸齒。
 - 羽化是三次盒狀模糊（近似高斯）；擴張/縮減是可分離的最大/最小值濾波。
-- 動態虛線邊框由 `traceOutline()` 產生：先在「內/外」交界產生單位有向邊，
+- 動態虛線邊框由 `traceLoops()` 產生：先在「內/外」交界產生單位有向邊，
   再串接成封閉迴圈，這樣 `setLineDash` 才能沿著輪廓連續跑。
+
+## 向量路徑
+
+`core/path.ts` 的 `VectorPath` 由多個 `SubPath` 組成，每個子路徑是一串 `Anchor`。
+控制桿（`inX/inY`、`outX/outY`）存絕對文件座標，命中測試與拖曳都不需要換算。
+
+- `toPath2D()` 會在兩端控制桿都貼在控制點上時輸出 `lineTo`，否則輸出 `bezierCurveTo`，
+  所以同一條路徑可以混用直線段與曲線段。
+- 平滑點在拖曳控制桿時由 `moveHandle(..., mirror)` 鏡射另一側。
+- 「從選取範圍建立工作路徑」重用選取範圍的輪廓追蹤結果（`Selection.loops()`），
+  再以 Ramer–Douglas–Peucker 簡化。追蹤出的迴圈不含重複的收尾點，
+  否則 RDP 的基準線會退化成零長度。
+- 筆型工具與直接選取工具都標記為 `group: 'vector'`；畫布在非向量工具下只畫路徑外框，
+  向量工具下才畫控制點與控制桿。
+
+## 色版
+
+`core/channels.ts` 同時處理兩件事：
+
+- **色彩色版**：從合成結果即時抽出 R/G/B 當成灰階顯示（`extractChannel`）。
+- **Alpha 色版**：儲存的 8 位元遮罩，格式與圖層遮色片相同（不透明灰階）。
+  可由選取範圍建立，也可以 Ctrl 點擊載回選取範圍。
+
+`renderChannelView()` 在 `PhotoDoc.composite()` 的最後一步套用：
+檢視單一色版時輸出灰階，檢視 RGB 時把「顯示中」的 Alpha 色版以設定的顏色疊印上去，
+效果等同快速遮色片。合成快取的鍵值含 `channelView` 與顯示中的色版清單。
+
+## 智慧型物件
+
+`core/smart.ts`。智慧型物件圖層 (`kind: 'smart'`) 持有：
+
+- `source`：原始像素，永遠不被寫入
+- 放置資料：`cx/cy`、`scaleX/scaleY`、`angle`
+- `filters`：可編輯的智慧型濾鏡堆疊
+
+`layer.surface` 只是快取。`renderSmartLayer()` 會從 `source` 依放置資料重畫，
+再依序套用啟用中的濾鏡（只處理放置範圍的外接矩形），因此：
+
+- 縮小再放大不會累積重新取樣的損失
+- 濾鏡參數隨時可改、可停用、可調整順序
+- 影像尺寸／版面尺寸／版面旋轉翻轉都只轉換放置資料
+  （`PhotoDoc.transformAll` 的 `smartOp` 參數負責映射中心點、角度與鏡射）
+- 任意變形工具偵測到智慧型物件時會寫回放置資料而不是烘焙像素
+
+因為像素是算出來的，`paintTarget()` 會拒絕把智慧型物件當成繪製目標，
+避免筆觸在下一次重繪時被覆蓋；要直接畫就先點陣化。
 
 ## 工具
 
@@ -146,7 +194,10 @@ interface Tool {
 }
 ```
 
-格式演進時請提高 `version` 並在 `io/files.ts` 的 `loadProject()` 內做向下相容處理。
+版本 2 起另外包含 `paths`、`activePathId` 與 `channels`，
+智慧型物件圖層會多存一個 `smart` 區塊（內嵌原始來源的 PNG 與放置資料、濾鏡堆疊）；
+載入後會重新渲染快取。格式演進時請提高 `version`
+並在 `io/files.ts` 的 `loadProject()` 內做向下相容處理。
 
 ## 測試
 

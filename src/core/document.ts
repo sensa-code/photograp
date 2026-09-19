@@ -8,6 +8,9 @@ import {
   createRasterLayer, findLayer, findParent, flattenLayers, uid,
 } from './layer';
 import { compositeLayers, type CompositeOptions } from './compositor';
+import { clonePath, type VectorPath } from './path';
+import { renderChannelView, type AlphaChannel, type ChannelView } from './channels';
+import { renderSmartLayer } from './smart';
 
 export interface LivePreview {
   layerId: string;
@@ -29,6 +32,13 @@ export class PhotoDoc {
   livePreview: LivePreview | null = null;
   soloLayerId: string | null = null;
   savedRevision = 0;
+  /** Saved vector paths; the last one is usually the live work path. */
+  paths: VectorPath[] = [];
+  activePathId: string | null = null;
+  /** Stored alpha channels (saved selections, spot masks). */
+  channels: AlphaChannel[] = [];
+  /** Which channel the canvas shows; not part of the undo history. */
+  channelView: ChannelView = 'rgb';
 
   private cache: Surface | null = null;
   private cacheKey = '';
@@ -75,6 +85,27 @@ export class PhotoDoc {
   }
 
   allLayers(): Layer[] { return flattenLayers(this.layers); }
+
+  activePath(): VectorPath | null {
+    return this.paths.find((p) => p.id === this.activePathId) ?? null;
+  }
+
+  /** Replace or insert a path, making it the active one. */
+  setPath(path: VectorPath): void {
+    const i = this.paths.findIndex((p) => p.id === path.id);
+    if (i >= 0) this.paths.splice(i, 1, path);
+    else this.paths.push(path);
+    this.activePathId = path.id;
+  }
+
+  clonePaths(): VectorPath[] { return this.paths.map(clonePath); }
+
+  /** Re-render every smart object whose cache is missing or stale. */
+  refreshSmartLayers(): void {
+    for (const l of this.allLayers()) {
+      if (l.kind === 'smart' && l.smart) renderSmartLayer(l, this.width, this.height);
+    }
+  }
 
   touch(): void {
     this.revision++;
@@ -133,6 +164,8 @@ export class PhotoDoc {
     if (this.editingMask && layer.mask) {
       return { layer, surface: layer.mask, isMask: true };
     }
+    // Smart objects re-render from their source, so direct paint would be lost.
+    if (layer.kind === 'smart') return null;
     if (!layer.surface) return null;
     return { layer, surface: layer.surface, isMask: false };
   }
@@ -150,9 +183,19 @@ export class PhotoDoc {
 
   /** Cached flattened render of the document. */
   composite(): Surface {
-    const key = `${this.revision}|${this.livePreview?.layerId ?? ''}|${this.soloLayerId ?? ''}|${this.width}x${this.height}`;
+    const key = [
+      this.revision,
+      this.livePreview?.layerId ?? '',
+      this.soloLayerId ?? '',
+      `${this.width}x${this.height}`,
+      this.channelView,
+      this.channels.filter((c) => c.visible).map((c) => c.id).join(','),
+    ].join('|');
     if (this.cache && this.cacheKey === key && !this.livePreview) return this.cache;
-    const out = compositeLayers(this.layers, this.compositeOptions());
+    let out = compositeLayers(this.layers, this.compositeOptions());
+    if (this.channelView !== 'rgb' || this.channels.some((c) => c.visible)) {
+      out = renderChannelView(out, this.channelView, this.channels);
+    }
     if (!this.livePreview) { this.cache = out; this.cacheKey = key; }
     return out;
   }
@@ -210,7 +253,19 @@ export class PhotoDoc {
     const sx = w / this.width, sy = h / this.height;
     const walk = (list: Layer[]): void => {
       for (const l of list) {
-        if (l.surface) l.surface = resampleSurface(l.surface, w, h, smooth);
+        // Smart objects rescale their placement and re-render from the source,
+        // so an Image Size change costs them no quality at all.
+        if (l.kind === 'smart' && l.smart) {
+          l.smart = {
+            ...l.smart,
+            cx: l.smart.cx * sx,
+            cy: l.smart.cy * sy,
+            scaleX: l.smart.scaleX * sx,
+            scaleY: l.smart.scaleY * sy,
+          };
+        } else if (l.surface) {
+          l.surface = resampleSurface(l.surface, w, h, smooth);
+        }
         if (l.mask) l.mask = resampleSurface(l.mask, w, h, smooth);
         l.x = Math.round(l.x * sx);
         l.y = Math.round(l.y * sy);
@@ -221,12 +276,16 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h);
+    this.refreshSmartLayers();
   }
 
   /** Canvas Size: keep pixel scale, re-place layers at an offset. */
   resizeCanvas(w: number, h: number, offsetX: number, offsetY: number): void {
     const walk = (list: Layer[]): void => {
       for (const l of list) {
+        if (l.kind === 'smart' && l.smart) {
+          l.smart = { ...l.smart, cx: l.smart.cx + offsetX, cy: l.smart.cy + offsetY };
+        }
         if (l.surface) {
           const s = createSurface(w, h);
           s.ctx.drawImage(l.surface.canvas, offsetX, offsetY);
@@ -246,12 +305,33 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h, offsetX, offsetY);
+    this.refreshSmartLayers();
   }
 
-  /** Apply an arbitrary transform to every layer (rotate / flip). */
-  transformAll(w: number, h: number, apply: (ctx: CanvasRenderingContext2D) => void): void {
+  /**
+   * Apply a canvas-level transform (rotate / flip) to every layer. Smart
+   * objects move their placement instead of their pixels, so they stay lossless.
+   */
+  transformAll(
+    w: number, h: number,
+    apply: (ctx: CanvasRenderingContext2D) => void,
+    smartOp?: SmartCanvasOp,
+  ): void {
     const walk = (list: Layer[]): void => {
       for (const l of list) {
+        if (l.kind === 'smart' && l.smart && smartOp) {
+          l.smart = { ...l.smart, ...remapSmart(l.smart, smartOp, this.width, this.height, w, h) };
+          l.x = 0; l.y = 0;
+          if (l.mask) {
+            const m = createSurface(w, h);
+            m.ctx.save(); apply(m.ctx);
+            m.ctx.drawImage(l.mask.canvas, 0, 0);
+            m.ctx.restore();
+            l.mask = m;
+          }
+          if (l.children) walk(l.children);
+          continue;
+        }
         if (l.surface) {
           const s = createSurface(w, h);
           s.ctx.save(); apply(s.ctx);
@@ -274,5 +354,29 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h);
+    this.refreshSmartLayers();
+  }
+}
+
+export type SmartCanvasOp = 'rot90' | 'rot-90' | 'rot180' | 'flipH' | 'flipV';
+
+/** Map a smart object's placement through a canvas rotate / flip. */
+function remapSmart(
+  s: NonNullable<Layer['smart']>, op: SmartCanvasOp,
+  oldW: number, oldH: number, newW: number, newH: number,
+): Partial<NonNullable<Layer['smart']>> {
+  void oldW; void oldH;
+  const HALF = Math.PI / 2;
+  switch (op) {
+    case 'rot90':
+      return { cx: newW - s.cy, cy: s.cx, angle: s.angle + HALF };
+    case 'rot-90':
+      return { cx: s.cy, cy: newH - s.cx, angle: s.angle - HALF };
+    case 'rot180':
+      return { cx: newW - s.cx, cy: newH - s.cy, angle: s.angle + Math.PI };
+    case 'flipH':
+      return { cx: newW - s.cx, angle: -s.angle, scaleX: -s.scaleX };
+    case 'flipV':
+      return { cy: newH - s.cy, angle: -s.angle, scaleY: -s.scaleY };
   }
 }

@@ -4,6 +4,7 @@ import { MarqueeTool, LassoTool, PolygonLassoTool, MagicWandTool } from './selec
 import { MoveTool, HandTool, ZoomTool, EyedropperTool, CropTool } from './nav';
 import { BucketTool, GradientTool, ShapeTool, TextTool } from './draw';
 import { TransformTool } from './transform';
+import { PenTool, DirectSelectTool } from './pen';
 
 export const transformTool = new TransformTool();
 export const cropTool = new CropTool();
@@ -25,6 +26,8 @@ export const TOOLS: Tool[] = [
   new DodgeBurnTool(),
   new BucketTool(),
   new GradientTool(),
+  new PenTool(),
+  new DirectSelectTool(),
   new TextTool(),
   new ShapeTool(),
   new HandTool(),
@@ -41,6 +44,7 @@ export const TOOL_SLOTS: string[][] = [
   ['brush', 'pencil', 'eraser'],
   ['clone', 'smudge', 'blur-sharpen', 'dodge-burn'],
   ['bucket', 'gradient'],
+  ['pen', 'direct-select'],
   ['text', 'shape'],
   ['hand', 'zoom'],
 ];

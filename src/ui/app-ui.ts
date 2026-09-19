@@ -14,13 +14,16 @@ import { LayersPanel } from './panels/layers';
 import { HistoryPanel } from './panels/history';
 import { ColorPanel } from './panels/color';
 import { NavigatorPanel } from './panels/navigator';
+import { ChannelsPanel } from './panels/channels';
+import { PathsPanel } from './panels/paths';
+import { panelTabs } from './panels/group';
 import { TextEditor } from './text-editor';
 import { installShortcuts } from './shortcuts';
 import { registerCommand, runCommand } from './commands';
 
 /** Clicking a panel title collapses it, as in a docked panel group. */
 function makePanelsCollapsible(container: HTMLElement): void {
-  for (const head of container.querySelectorAll<HTMLElement>('.panel-head')) {
+  for (const head of container.querySelectorAll<HTMLElement>('.panel-head:not(.panel-tabstrip)')) {
     const caret = el('span', { class: 'caret', html: icon('down', 12) });
     head.insertBefore(caret, head.firstChild);
     on(head, 'click', (ev) => {
@@ -50,11 +53,16 @@ export class AppUI {
     this.view = new CanvasView(app);
     this.textEditor = new TextEditor(app, this.view);
 
+    const stack = panelTabs([
+      { label: '圖層', icon: 'layers', root: new LayersPanel(app).root },
+      { label: '色版', icon: 'channels', root: new ChannelsPanel(app).root },
+      { label: '路徑', icon: 'path', root: new PathsPanel(app).root },
+    ]);
     const panels = el('div', { class: 'panels' },
       new NavigatorPanel(app, this.view).root,
       new ColorPanel(app).root,
       new HistoryPanel(app).root,
-      new LayersPanel(app).root);
+      stack);
     makePanelsCollapsible(panels);
 
     this.statusLeft = el('div', { class: 'grow' });

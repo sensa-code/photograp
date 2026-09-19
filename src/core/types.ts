@@ -89,7 +89,35 @@ export interface TextStyle {
   strokeColor: RGB;
 }
 
-export type LayerKind = 'raster' | 'text' | 'adjustment' | 'group';
+export type LayerKind = 'raster' | 'text' | 'adjustment' | 'group' | 'smart';
+
+/** One non-destructive filter stacked on a smart object. */
+export interface SmartFilterEntry {
+  id: string;
+  filterId: string;
+  params: Record<string, unknown>;
+  enabled: boolean;
+  opacity: number;
+  blend: BlendMode;
+}
+
+/**
+ * A smart object keeps its original pixels untouched. The placement and the
+ * smart-filter stack are re-applied from the source whenever either changes,
+ * so scaling down and back up loses nothing.
+ */
+export interface SmartObject {
+  source: Surface;
+  sourceWidth: number;
+  sourceHeight: number;
+  /** Centre of the placed content, in document coordinates. */
+  cx: number;
+  cy: number;
+  scaleX: number;
+  scaleY: number;
+  angle: number;
+  filters: SmartFilterEntry[];
+}
 
 export interface LayerEffects {
   dropShadow: { enabled: boolean; color: RGB; alpha: number; blur: number; dx: number; dy: number };
@@ -118,6 +146,7 @@ export interface Layer {
   clipped: boolean;
   text?: TextStyle;
   adjustment?: AdjustmentSpec;
+  smart?: SmartObject;
   /** Group layers own children (top of array renders last, i.e. on top). */
   children?: Layer[];
   expanded?: boolean;

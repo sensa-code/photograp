@@ -21,6 +21,14 @@ import { serializeDocument, loadProject } from '../src/io/files';
 import { TOOLS } from '../src/tools';
 import { optionDefaults, type ToolPointer } from '../src/tools/types';
 import { app } from '../src/core/app';
+import {
+  anchorCount, createAnchor, createPath, hitTest, moveAnchor, moveHandle,
+  pathFromLoops, simplify, toPath2D,
+} from '../src/core/path';
+import {
+  channelCoverage, createAlphaChannel, extractChannel, renderChannelView, setChannelCoverage,
+} from '../src/core/channels';
+import { createSmartObject, renderSmartLayer, smartBounds, smartFilterEntry } from '../src/core/smart';
 
 interface Case { name: string; error?: string }
 const groups: { name: string; cases: Case[] }[] = [];
@@ -530,6 +538,230 @@ async function run(): Promise<void> {
     const b = cloneSurface(a);
     b.ctx.clearRect(0, 0, 8, 8);
     assert(pixel(a, 4, 4)[0] === 255, '原表面不應被清除');
+  });
+
+  // ---- vector paths ----
+  group('向量路徑');
+  await test('控制點與控制桿一起移動', () => {
+    const a = createAnchor(10, 10);
+    a.outX = 20; a.outY = 10;
+    moveAnchor(a, 30, 40);
+    assert(a.x === 30 && a.y === 40, '控制點應移動');
+    assert(a.outX === 40 && a.outY === 40, '控制桿應跟著位移');
+  });
+  await test('平滑點的控制桿互相鏡射', () => {
+    const a = createAnchor(50, 50, true);
+    moveHandle(a, 'out', 70, 50, true);
+    assert(a.inX === 30 && a.inY === 50, `另一側應鏡射，實得 ${a.inX},${a.inY}`);
+    moveHandle(a, 'out', 70, 20, false);
+    assert(a.inX === 30 && a.inY === 50, '未要求鏡射時另一側不應變動');
+  });
+  await test('路徑可轉成填色區域', () => {
+    const path = createPath('t');
+    path.subpaths.push({
+      closed: true,
+      anchors: [createAnchor(10, 10), createAnchor(50, 10), createAnchor(50, 40), createAnchor(10, 40)],
+    });
+    const cov = rasterizePath(toPath2D(path), 60, 60);
+    assert(cov[25 * 60 + 30] === 255, '矩形路徑內部應被填滿');
+    assert(cov[5 * 60 + 5] === 0, '路徑外部應為空');
+    assert(anchorCount(path) === 4, '控制點數量不正確');
+  });
+  await test('貝茲曲線段會離開直線', () => {
+    const path = createPath('curve');
+    const a = createAnchor(10, 50, true);
+    const b = createAnchor(90, 50, true);
+    a.outX = 30; a.outY = 0;
+    b.inX = 70; b.inY = 0;
+    path.subpaths.push({ closed: false, anchors: [a, b] });
+    const canvas = createSurface(100, 100);
+    canvas.ctx.lineWidth = 3;
+    canvas.ctx.strokeStyle = '#fff';
+    canvas.ctx.stroke(toPath2D(path));
+    const d = canvas.ctx.getImageData(0, 0, 100, 100).data;
+    let above = 0;
+    for (let y = 10; y < 45; y++) above += d[(y * 100 + 50) * 4 + 3];
+    assert(above > 0, '曲線應離開起訖點連線');
+    assert(d[(50 * 100 + 50) * 4 + 3] < 200, '曲線中段不應停留在直線上');
+  });
+  await test('命中測試可分辨控制點與控制桿', () => {
+    const path = createPath('t');
+    const a = createAnchor(40, 40, true);
+    moveHandle(a, 'out', 60, 40, true);
+    path.subpaths.push({ closed: false, anchors: [a, createAnchor(100, 100)] });
+    assert(hitTest(path, { x: 41, y: 41 }, 5)?.part === 'point', '應命中控制點');
+    assert(hitTest(path, { x: 60, y: 41 }, 5)?.part === 'out', '應命中外控制桿');
+    assert(hitTest(path, { x: 5, y: 5 }, 5) === null, '空白處應無命中');
+  });
+  await test('簡化會保留轉角', () => {
+    const pts = [
+      { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }, { x: 30, y: 0 },
+      { x: 30, y: 10 }, { x: 30, y: 20 },
+    ];
+    const out = simplify(pts, 1);
+    assert(out.length === 3, `應只剩三個點，實得 ${out.length}`);
+    assert(out[1].x === 30 && out[1].y === 0, '轉角應被保留');
+  });
+  await test('從選取範圍建立的路徑可還原選取區域', () => {
+    const sel = new Selection(80, 80);
+    const p = new Path2D();
+    p.rect(20, 20, 40, 30);
+    sel.combine(rasterizePath(p, 80, 80), 'replace');
+    const path = pathFromLoops(sel.loops(), 1, '工作路徑');
+    assert(path.subpaths.length === 1, '應產生一個子路徑');
+    const cov = rasterizePath(toPath2D(path), 80, 80);
+    assert(cov[35 * 80 + 40] === 255, '還原後內部應被選取');
+    assert(cov[5 * 80 + 5] === 0, '還原後外部不應被選取');
+  });
+
+  // ---- channels ----
+  group('色版');
+  await test('可取出單一色彩色版', () => {
+    const s = filled(4, 4, 'rgb(200,100,50)');
+    assert(pixel(extractChannel(s, 'r'), 1, 1)[0] === 200, '紅色版數值不正確');
+    assert(pixel(extractChannel(s, 'g'), 1, 1)[0] === 100, '綠色版數值不正確');
+    assert(pixel(extractChannel(s, 'b'), 1, 1)[0] === 50, '藍色版數值不正確');
+  });
+  await test('Alpha 色版可存取覆蓋率', () => {
+    const cov = new Uint8Array(16).fill(0);
+    cov[5] = 255;
+    const ch = createAlphaChannel('Alpha 1', 4, 4, cov);
+    const back = channelCoverage(ch.surface);
+    assert(back[5] === 255 && back[0] === 0, '色版覆蓋率往返不正確');
+    setChannelCoverage(ch, new Uint8Array(16).fill(128));
+    assert(channelCoverage(ch.surface)[0] === 128, '覆蓋率寫入失敗');
+  });
+  await test('檢視單一色版會顯示灰階', () => {
+    const composite = filled(4, 4, 'rgb(255,0,0)');
+    const view = renderChannelView(composite, 'r', []);
+    const p = pixel(view, 1, 1);
+    assert(p[0] === 255 && p[1] === 255 && p[2] === 255, `紅色版應為白色，實得 ${p}`);
+    assert(pixel(renderChannelView(composite, 'g', []), 1, 1)[0] === 0, '綠色版應為黑色');
+  });
+  await test('顯示中的 Alpha 色版會疊印在影像上', () => {
+    const composite = filled(8, 8, 'rgb(0,0,0)');
+    const ch = createAlphaChannel('quick', 8, 8, new Uint8Array(64).fill(255));
+    ch.visible = true;
+    ch.opacity = 1;
+    ch.color = { r: 255, g: 0, b: 0 };
+    const p = pixel(renderChannelView(composite, 'rgb', [ch]), 4, 4);
+    assert(p[0] > 200 && p[1] < 40, `疊印顏色不正確：${p}`);
+  });
+
+  // ---- smart objects ----
+  group('智慧型物件');
+  await test('智慧型物件會依放置資料渲染', () => {
+    const source = filled(20, 10, '#ff0000');
+    const layer = createRasterLayer('smart', 100, 100);
+    layer.kind = 'smart';
+    layer.smart = createSmartObject(source, 50, 50);
+    renderSmartLayer(layer, 100, 100);
+    assert(pixel(layer.surface!, 50, 50)[0] === 255, '中心應為來源顏色');
+    assert(pixel(layer.surface!, 5, 5)[3] === 0, '範圍外應透明');
+    const b = smartBounds(layer.smart, 100, 100);
+    assert(b.w >= 20 && b.h >= 10, `放置邊界不正確：${JSON.stringify(b)}`);
+  });
+  await test('縮小再放大不會損失畫質', () => {
+    const source = createSurface(64, 64);
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        source.ctx.fillStyle = (x + y) % 2 ? '#ffffff' : '#000000';
+        source.ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    const layer = createRasterLayer('smart', 128, 128);
+    layer.kind = 'smart';
+    layer.smart = createSmartObject(source, 64, 64);
+
+    renderSmartLayer(layer, 128, 128);
+    const original = layer.surface!.ctx.getImageData(0, 0, 128, 128).data.slice();
+
+    layer.smart = { ...layer.smart, scaleX: 0.1, scaleY: 0.1 };
+    renderSmartLayer(layer, 128, 128);
+    layer.smart = { ...layer.smart, scaleX: 1, scaleY: 1 };
+    renderSmartLayer(layer, 128, 128);
+    const after = layer.surface!.ctx.getImageData(0, 0, 128, 128).data;
+
+    let diff = 0;
+    for (let i = 0; i < original.length; i++) if (Math.abs(original[i] - after[i]) > 1) diff++;
+    assert(diff === 0, `來回縮放後應完全相同，實際有 ${diff} 個位元組不同`);
+  });
+  await test('智慧型濾鏡可套用與停用', () => {
+    const source = filled(40, 40, 'rgb(0,0,0)');
+    source.ctx.fillStyle = '#ffffff';
+    source.ctx.fillRect(20, 0, 20, 40);
+    const layer = createRasterLayer('smart', 60, 60);
+    layer.kind = 'smart';
+    layer.smart = createSmartObject(source, 30, 30);
+    renderSmartLayer(layer, 60, 60);
+    const sharpEdge = pixel(layer.surface!, 29, 30)[0];
+
+    const entry = smartFilterEntry('gaussian-blur', { radius: 8 });
+    layer.smart.filters.push(entry);
+    renderSmartLayer(layer, 60, 60);
+    const blurred = pixel(layer.surface!, 29, 30)[0];
+    assert(blurred > sharpEdge + 10, `濾鏡應讓邊界變模糊：${sharpEdge} → ${blurred}`);
+
+    entry.enabled = false;
+    renderSmartLayer(layer, 60, 60);
+    assert(Math.abs(pixel(layer.surface!, 29, 30)[0] - sharpEdge) <= 2, '停用濾鏡後應回到原狀');
+  });
+  await test('專案存檔保留路徑、色版與智慧型物件', async () => {
+    const d = PhotoDoc.createBlank('t', 60, 40, 'white');
+    const source = filled(20, 20, '#3388ff');
+    const smart = createRasterLayer('智慧', 60, 40);
+    smart.kind = 'smart';
+    smart.smart = createSmartObject(source, 30, 20);
+    smart.smart.scaleX = 1.5;
+    smart.smart.filters.push(smartFilterEntry('gaussian-blur', { radius: 2 }));
+    renderSmartLayer(smart, 60, 40);
+    d.layers.push(smart);
+
+    const path = createPath('路徑 1');
+    path.subpaths.push({
+      closed: true,
+      anchors: [createAnchor(5, 5), createAnchor(30, 5), createAnchor(30, 25)],
+    });
+    d.setPath(path);
+    d.channels.push(createAlphaChannel('Alpha 1', 60, 40, new Uint8Array(60 * 40).fill(90)));
+    d.commit('setup');
+
+    const restored = await loadProject(serializeDocument(d));
+    assert(restored.paths.length === 1 && anchorCount(restored.paths[0]) === 3, '路徑應被保留');
+    assert(restored.channels.length === 1, '色版應被保留');
+    assert(channelCoverage(restored.channels[0].surface)[0] === 90, '色版內容應被保留');
+    const rs = restored.layers[1];
+    assert(rs.kind === 'smart' && !!rs.smart, '智慧型物件應被保留');
+    assert(rs.smart!.sourceWidth === 20, '來源尺寸應被保留');
+    near(rs.smart!.scaleX, 1.5, 0.001, '縮放應被保留');
+    assert(rs.smart!.filters.length === 1, '智慧型濾鏡應被保留');
+
+    const a = d.render(), b = restored.render();
+    const da = a.ctx.getImageData(0, 0, a.w, a.h).data;
+    const db = b.ctx.getImageData(0, 0, b.w, b.h).data;
+    let diff = 0;
+    for (let i = 0; i < da.length; i++) if (Math.abs(da[i] - db[i]) > 2) diff++;
+    assert(diff === 0, `合成結果應一致，實際有 ${diff} 個位元組不同`);
+  });
+  await test('影像尺寸改變時智慧型物件重新取樣自來源', () => {
+    const source = filled(40, 40, '#00aa55');
+    const d = PhotoDoc.createBlank('t', 80, 80, 'transparent');
+    const layer = createRasterLayer('smart', 80, 80);
+    layer.kind = 'smart';
+    layer.smart = createSmartObject(source, 40, 40);
+    renderSmartLayer(layer, 80, 80);
+    d.layers.push(layer);
+    d.resampleTo(160, 160, true);
+    assert(layer.smart!.scaleX === 2, '放置縮放應跟著文件放大');
+    assert(layer.smart!.sourceWidth === 40, '來源不應被重新取樣');
+    assert(pixel(layer.surface!, 80, 80)[1] === 170, '重新渲染後顏色應保持');
+  });
+  await test('智慧型物件圖層不可直接繪製', () => {
+    const d = PhotoDoc.createBlank('t', 30, 30, 'transparent');
+    const layer = d.activeLayer()!;
+    layer.kind = 'smart';
+    layer.smart = createSmartObject(filled(10, 10, '#fff'), 15, 15);
+    assert(d.paintTarget() === null, '智慧型物件不應成為繪製目標');
   });
 
   // ---- tools smoke test ----

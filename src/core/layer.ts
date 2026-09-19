@@ -59,6 +59,10 @@ export function shallowCopyLayer(l: Layer): Layer {
     text: l.text ? { ...l.text, color: { ...l.text.color }, strokeColor: { ...l.text.strokeColor } } : undefined,
     adjustment: l.adjustment ? structuredCloneSpec(l.adjustment) : undefined,
     children: l.children ? l.children.map(shallowCopyLayer) : undefined,
+    // The source surface is shared copy-on-write, like layer pixels.
+    smart: l.smart
+      ? { ...l.smart, filters: l.smart.filters.map((f) => ({ ...f, params: { ...f.params } })) }
+      : undefined,
   };
 }
 
@@ -69,6 +73,13 @@ export function duplicateLayer(l: Layer, nameSuffix = ' 拷貝'): Layer {
   copy.name = l.name + nameSuffix;
   copy.surface = l.surface ? cloneSurface(l.surface) : null;
   copy.mask = l.mask ? cloneSurface(l.mask) : null;
+  if (l.smart) {
+    copy.smart = {
+      ...l.smart,
+      source: cloneSurface(l.smart.source),
+      filters: l.smart.filters.map((f) => ({ ...f, params: { ...f.params } })),
+    };
+  }
   if (copy.children) copy.children = l.children!.map((c) => duplicateLayer(c, ''));
   return copy;
 }
@@ -118,5 +129,7 @@ export function layerKindLabel(l: Layer): string {
     case 'text': return '文字圖層';
     case 'adjustment': return '調整圖層';
     case 'group': return '圖層群組';
+    case 'smart': return '智慧型物件';
+    default: return '圖層';
   }
 }

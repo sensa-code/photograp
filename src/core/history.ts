@@ -1,6 +1,8 @@
 import type { Layer } from './types';
 import { shallowCopyLayer } from './layer';
 import { Selection } from './selection';
+import { clonePath, type VectorPath } from './path';
+import type { AlphaChannel } from './channels';
 
 export interface HistorySnapshot {
   label: string;
@@ -10,6 +12,9 @@ export interface HistorySnapshot {
   width: number;
   height: number;
   editingMask: boolean;
+  paths: VectorPath[];
+  activePathId: string | null;
+  channels: AlphaChannel[];
 }
 
 export interface HistoryHost {
@@ -18,6 +23,9 @@ export interface HistoryHost {
   selection: Selection;
   meta: { width: number; height: number };
   editingMask: boolean;
+  paths: VectorPath[];
+  activePathId: string | null;
+  channels: AlphaChannel[];
 }
 
 /**
@@ -43,6 +51,10 @@ export class History {
       width: host.meta.width,
       height: host.meta.height,
       editingMask: host.editingMask,
+      paths: host.paths.map(clonePath),
+      activePathId: host.activePathId,
+      // Channel surfaces are shared copy-on-write, like layer pixels.
+      channels: host.channels.map((c) => ({ ...c, color: { ...c.color } })),
     };
   }
 
@@ -63,6 +75,11 @@ export class History {
     host.meta.width = snap.width;
     host.meta.height = snap.height;
     host.editingMask = snap.editingMask;
+    host.paths.length = 0;
+    for (const p of snap.paths) host.paths.push(clonePath(p));
+    host.activePathId = snap.activePathId;
+    host.channels.length = 0;
+    for (const c of snap.channels) host.channels.push({ ...c, color: { ...c.color } });
   }
 
   undo(host: HistoryHost): boolean {

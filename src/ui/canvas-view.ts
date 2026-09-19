@@ -2,6 +2,7 @@ import type { App } from '../core/app';
 import type { PhotoDoc } from '../core/document';
 import { clamp } from '../core/geometry';
 import { getTool, transformTool } from '../tools';
+import { drawPathOverlay } from '../tools/pen';
 import type { Tool, ToolPointer } from '../tools/types';
 import { zoomAt } from '../tools/nav';
 import { el, on } from './dom';
@@ -355,7 +356,11 @@ export class CanvasView {
     ctx.save();
     ctx.translate(o.x, o.y);
     ctx.scale(z, z);
-    this.tool().drawOverlay?.({ ctx, zoom: z, doc, app: this.app, cursor: this.cursorDoc });
+    const tool = this.tool();
+    // The active path stays visible under every tool, as in Photoshop.
+    const path = doc.activePath();
+    if (path && tool.group !== 'vector') drawPathOverlay(ctx, path, z, { anchors: false });
+    tool.drawOverlay?.({ ctx, zoom: z, doc, app: this.app, cursor: this.cursorDoc });
     this.drawAnts(ctx, doc, z);
     ctx.restore();
 

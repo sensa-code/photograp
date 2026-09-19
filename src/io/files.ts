@@ -1,12 +1,15 @@
 import { PhotoDoc } from '../core/document';
-import type { Layer, LayerEffects } from '../core/types';
+import type { Layer, LayerEffects, SmartFilterEntry } from '../core/types';
 import { createSurface, type Surface } from '../core/surface';
 import { defaultEffects, uid } from '../core/layer';
 import { Selection } from '../core/selection';
+import { clonePath, type VectorPath } from '../core/path';
+import type { AlphaChannel } from '../core/channels';
+import { renderSmartLayer } from '../core/smart';
 
 export const PROJECT_EXT = '.pgraph';
 const PROJECT_MAGIC = 'photograp-project';
-const PROJECT_VERSION = 1;
+const PROJECT_VERSION = 2;
 
 export interface OpenedImage { name: string; image: HTMLImageElement }
 
@@ -99,6 +102,28 @@ interface SerializedLayer {
   effects: LayerEffects;
   children?: SerializedLayer[];
   expanded?: boolean;
+  smart?: SerializedSmart;
+}
+
+interface SerializedSmart {
+  source: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  cx: number;
+  cy: number;
+  scaleX: number;
+  scaleY: number;
+  angle: number;
+  filters: SmartFilterEntry[];
+}
+
+interface SerializedChannel {
+  id: string;
+  name: string;
+  surface: string;
+  color: { r: number; g: number; b: number };
+  opacity: number;
+  visible: boolean;
 }
 
 interface SerializedDoc {
@@ -111,6 +136,9 @@ interface SerializedDoc {
   activeLayerId: string | null;
   selection: string | null;
   layers: SerializedLayer[];
+  paths?: VectorPath[];
+  activePathId?: string | null;
+  channels?: SerializedChannel[];
 }
 
 const encode = (s: Surface | null): string | null => (s ? s.canvas.toDataURL('image/png') : null);
@@ -124,6 +152,19 @@ function serializeLayer(l: Layer): SerializedLayer {
     text: l.text, adjustment: l.adjustment, effects: l.effects,
     expanded: l.expanded,
     children: l.children?.map(serializeLayer),
+    smart: l.smart
+      ? {
+        source: l.smart.source.canvas.toDataURL('image/png'),
+        sourceWidth: l.smart.sourceWidth,
+        sourceHeight: l.smart.sourceHeight,
+        cx: l.smart.cx,
+        cy: l.smart.cy,
+        scaleX: l.smart.scaleX,
+        scaleY: l.smart.scaleY,
+        angle: l.smart.angle,
+        filters: l.smart.filters,
+      }
+      : undefined,
   };
 }
 
@@ -151,6 +192,16 @@ export function serializeDocument(doc: PhotoDoc): string {
     activeLayerId: doc.activeLayerId,
     selection: encodeSelection(doc.selection),
     layers: doc.layers.map(serializeLayer),
+    paths: doc.paths.map(clonePath),
+    activePathId: doc.activePathId,
+    channels: doc.channels.map((c) => ({
+      id: c.id,
+      name: c.name,
+      surface: c.surface.canvas.toDataURL('image/png'),
+      color: { ...c.color },
+      opacity: c.opacity,
+      visible: c.visible,
+    })),
   };
   return JSON.stringify(out);
 }
@@ -172,6 +223,23 @@ async function deserializeLayer(s: SerializedLayer, w: number, h: number): Promi
     return surf;
   };
   const children = s.children ? await Promise.all(s.children.map((c) => deserializeLayer(c, w, h))) : undefined;
+  let smart: Layer['smart'];
+  if (s.smart) {
+    const img = await loadImageSrc(s.smart.source);
+    const source = createSurface(s.smart.sourceWidth, s.smart.sourceHeight);
+    source.ctx.drawImage(img, 0, 0);
+    smart = {
+      source,
+      sourceWidth: s.smart.sourceWidth,
+      sourceHeight: s.smart.sourceHeight,
+      cx: s.smart.cx,
+      cy: s.smart.cy,
+      scaleX: s.smart.scaleX,
+      scaleY: s.smart.scaleY,
+      angle: s.smart.angle,
+      filters: s.smart.filters ?? [],
+    };
+  }
   return {
     id: s.id || uid(),
     name: s.name,
@@ -192,6 +260,7 @@ async function deserializeLayer(s: SerializedLayer, w: number, h: number): Promi
     effects: s.effects ?? defaultEffects(),
     expanded: s.expanded ?? true,
     children,
+    smart,
   };
 }
 
@@ -201,6 +270,18 @@ export async function loadProject(text: string): Promise<PhotoDoc> {
   const doc = new PhotoDoc(data.name, data.width, data.height, data.dpi ?? 72);
   doc.layers = await Promise.all(data.layers.map((l) => deserializeLayer(l, data.width, data.height)));
   doc.activeLayerId = data.activeLayerId ?? doc.layers[doc.layers.length - 1]?.id ?? null;
+  doc.paths = (data.paths ?? []).map(clonePath);
+  doc.activePathId = data.activePathId ?? doc.paths[doc.paths.length - 1]?.id ?? null;
+  doc.channels = await Promise.all((data.channels ?? []).map(async (c): Promise<AlphaChannel> => {
+    const img = await loadImageSrc(c.surface);
+    const surface = createSurface(data.width, data.height);
+    surface.ctx.drawImage(img, 0, 0);
+    return { id: c.id, name: c.name, surface, color: c.color, opacity: c.opacity, visible: c.visible };
+  }));
+  // Smart caches are not stored; rebuild them from the embedded sources.
+  for (const l of doc.allLayers()) {
+    if (l.kind === 'smart' && l.smart) renderSmartLayer(l, doc.width, doc.height);
+  }
   if (data.selection) {
     const img = await loadImageSrc(data.selection);
     const s = createSurface(data.width, data.height);
