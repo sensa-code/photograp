@@ -15,6 +15,8 @@ import { applyFillRegion, contentAwareFill } from '../filters/inpaint';
 import { dilateMask } from '../filters/heal';
 import { createSmartObject, renderSmartLayer, replaceSmartSource, smartFilterEntry } from '../core/smart';
 import { rgbCss } from '../core/color';
+import { defaultPathBinding, renderTextLayer } from '../core/text';
+import { flattenPath } from '../core/path';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
 import { loadImageFile, pickFiles } from '../io/files';
 import { liquifyDialog } from './dialogs/liquify';
@@ -449,6 +451,46 @@ function guidesFromSelection(app: App): void {
   app.changed();
 }
 
+/** The active layer when it is type, which is what the path commands act on. */
+const textLayer = (app: App): ReturnType<PhotoDoc['activeLayer']> => {
+  const l = doc(app)?.activeLayer();
+  return l && l.kind === 'text' && l.text && !l.locked ? l : null;
+};
+
+function attachTextToPath(app: App): void {
+  const d = doc(app);
+  const layer = textLayer(app);
+  const path = d?.activePath();
+  if (!d || !layer?.text) return;
+  if (!path || !flattenPath(path).length) {
+    app.toast('請先選擇一條至少有兩個控制點的路徑', 'error');
+    return;
+  }
+  layer.text.onPath = defaultPathBinding(path.id);
+  renderTextLayer(layer, d.width, d.height, d.paths);
+  d.commit('使文字沿路徑');
+  app.status(`「${layer.name}」已沿著路徑「${path.name}」排列`);
+  app.changed();
+}
+
+function detachTextFromPath(app: App): void {
+  const d = doc(app);
+  const layer = textLayer(app);
+  if (!d || !layer?.text?.onPath) return;
+  // Leave the block where the type was sitting rather than at the origin.
+  const flat = flattenPath(d.paths.find((p) => p.id === layer.text!.onPath!.pathId)
+    ?? { id: '', name: '', subpaths: [] })[0];
+  const start = flat?.pts[0];
+  layer.text.onPath = undefined;
+  if (start) {
+    layer.x = Math.round(start.x);
+    layer.y = Math.round(start.y);
+  }
+  renderTextLayer(layer, d.width, d.height, d.paths);
+  d.commit('解除文字路徑');
+  app.changed();
+}
+
 /** The active layer when it is an unlocked, re-editable vector shape. */
 const shapeLayer = (app: App): ReturnType<PhotoDoc['activeLayer']> => {
   const l = doc(app)?.activeLayer();
@@ -560,6 +602,14 @@ export const VECTOR_COMMANDS: Cmd[] = [
   snapToggle('view.snapDocument', '靠齊至文件邊界', 'toDocument'),
   snapToggle('view.snapLayers', '靠齊至圖層', 'toLayers'),
   cmd('view.gridSize', '格點間距…', (a) => gridSizeDialog(a)),
+
+  // ---- type on a path ----
+  cmd('text.onPath', '使文字沿路徑', attachTextToPath, {
+    enabled: (a) => !!textLayer(a) && !pathIsEmpty(doc(a)?.activePath() ?? null),
+  }),
+  cmd('text.offPath', '解除文字路徑', detachTextFromPath, {
+    enabled: (a) => !!textLayer(a)?.text?.onPath,
+  }),
 
   // ---- vector shape layers ----
   cmd('layer.shapeOptions', '形狀選項…', (a) => shapeOptionsDialog(a), {

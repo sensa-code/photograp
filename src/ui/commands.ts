@@ -697,7 +697,7 @@ export const commandEnabled = (app: App, id: string): boolean => {
 export function refreshTextLayer(app: App, layer: Layer, label: string): void {
   const doc = app.activeDoc();
   if (!doc || !layer.text) return;
-  renderTextLayer(layer, doc.width, doc.height);
+  renderTextLayer(layer, doc.width, doc.height, doc.paths);
   doc.commit(label);
   app.changed();
 }

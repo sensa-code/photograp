@@ -261,6 +261,7 @@ export class LayersPanel {
       el('span', { text: BLEND_LABELS[layer.blend] }),
       layer.kind === 'smart' ? el('span', { class: 'badge', text: '智慧' }) : null,
       layer.kind === 'shape' ? el('span', { class: 'badge', text: '形狀' }) : null,
+      layer.text?.onPath ? el('span', { class: 'badge', text: '沿路徑' }) : null,
       smartFilters ? el('span', { class: 'badge', text: `濾鏡 ${smartFilters}` }) : null,
       layer.clipped ? el('span', { class: 'clip-mark', text: '↳ 剪裁' }) : null,
       layer.locked ? el('span', { text: '🔒' }) : null);

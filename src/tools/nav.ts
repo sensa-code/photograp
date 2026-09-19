@@ -6,6 +6,8 @@ import { clamp, normalizeRect, type Rect } from '../core/geometry';
 import { luminance, type RGB } from '../core/color';
 import { layerBounds, snapRect } from '../core/guides';
 import { renderShapeLayer } from '../core/shape';
+import { renderTextLayer } from '../core/text';
+import { closestOnPath, flattenPath, pathPointAt, type FlatPath } from '../core/path';
 import { clearSnapLines, showSnapLines, snapContextFor } from './snap';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
@@ -57,6 +59,21 @@ export class MoveTool implements Tool {
   private delta = { x: 0, y: 0 };
   /** Content bounds at drag start, used to snap edges and centres. */
   private startBounds: Rect | null = null;
+  /** Set while dragging type that is bound to a path. */
+  private pathDrag:
+    { flat: FlatPath; offset: number; shift: number; grabbedAt: number } | null = null;
+
+  /**
+   * Split a screen-space drag into movement along the curve and away from it,
+   * measured where the pointer grabbed the type — the tangent elsewhere on the
+   * curve can point somewhere quite different.
+   */
+  private splitAlongPath(dx: number, dy: number): { along: number; away: number } {
+    const drag = this.pathDrag!;
+    const at = pathPointAt(drag.flat, drag.grabbedAt) ?? { angle: 0, x: 0, y: 0 };
+    const cos = Math.cos(at.angle), sin = Math.sin(at.angle);
+    return { along: dx * cos + dy * sin, away: dx * -sin + dy * cos };
+  }
 
   private pickLayer(e: ToolPointer): Layer | null {
     const list = e.doc.layers;
@@ -82,6 +99,17 @@ export class MoveTool implements Tool {
     }
     this.layer = layer;
     this.delta = { x: 0, y: 0 };
+    const bind = layer.text?.onPath;
+    const boundPath = bind ? e.doc.paths.find((x) => x.id === bind.pathId) : undefined;
+    const flat = boundPath ? flattenPath(boundPath)[0] ?? null : null;
+    this.pathDrag = bind && flat && boundPath
+      ? {
+        flat,
+        offset: bind.offset,
+        shift: bind.baselineShift,
+        grabbedAt: closestOnPath(boundPath, { x: e.x, y: e.y })?.along ?? bind.offset,
+      }
+      : null;
     this.startBounds = e.doc.selection.active && !e.doc.editingMask
       ? e.doc.selection.bounds()
       : layerBounds(layer);
@@ -137,7 +165,15 @@ export class MoveTool implements Tool {
     }
     this.delta = { x: dx, y: dy };
 
-    if (this.mode === 'layer') {
+    if (this.mode === 'layer' && this.pathDrag && this.layer.text?.onPath) {
+      // Type on a path has no free position: split the drag into "along the
+      // curve" and "away from it", which is how it is steered in Photoshop.
+      const { along, away } = this.splitAlongPath(dx, dy);
+      this.layer.text.onPath.offset = this.pathDrag.offset + along;
+      this.layer.text.onPath.baselineShift = this.pathDrag.shift - away;
+      renderTextLayer(this.layer, e.doc.width, e.doc.height, e.doc.paths);
+      e.doc.touch();
+    } else if (this.mode === 'layer') {
       this.layer.x = this.origin.x + dx;
       this.layer.y = this.origin.y + dy;
       e.doc.touch();
@@ -170,7 +206,7 @@ export class MoveTool implements Tool {
       if (this.layer.kind === 'shape' && this.layer.shape) {
         renderShapeLayer(this.layer, e.doc.width, e.doc.height);
       }
-      e.doc.commit('移動圖層');
+      e.doc.commit(this.pathDrag ? '移動路徑文字' : '移動圖層');
     }
     this.mode = 'none';
     this.layer = null;
@@ -182,10 +218,15 @@ export class MoveTool implements Tool {
 
   cancel(app: App): void {
     const doc = app.activeDoc();
-    if (this.mode === 'layer' && this.layer) {
+    if (this.mode === 'layer' && this.layer && this.pathDrag && this.layer.text?.onPath) {
+      this.layer.text.onPath.offset = this.pathDrag.offset;
+      this.layer.text.onPath.baselineShift = this.pathDrag.shift;
+      if (doc) renderTextLayer(this.layer, doc.width, doc.height, doc.paths);
+    } else if (this.mode === 'layer' && this.layer) {
       this.layer.x = this.origin.x;
       this.layer.y = this.origin.y;
     }
+    this.pathDrag = null;
     if (doc) { doc.livePreview = null; doc.touch(); }
     this.mode = 'none';
     this.layer = null;

@@ -6,6 +6,7 @@ import { Selection } from '../core/selection';
 import { clonePath, type VectorPath } from '../core/path';
 import type { AlphaChannel } from '../core/channels';
 import { renderSmartLayer } from '../core/smart';
+import { renderTextLayer } from '../core/text';
 import { renderShapeLayer } from '../core/shape';
 import type { QuickMask } from '../core/quickmask';
 import type { Guide } from '../core/guides';
@@ -325,6 +326,9 @@ export async function loadProject(text: string): Promise<PhotoDoc> {
   for (const l of doc.allLayers()) {
     if (l.kind === 'smart' && l.smart) renderSmartLayer(l, doc.width, doc.height);
     else if (l.kind === 'shape' && l.shape) renderShapeLayer(l, doc.width, doc.height);
+    else if (l.kind === 'text' && l.text?.onPath) {
+      renderTextLayer(l, doc.width, doc.height, doc.paths);
+    }
   }
   if (data.selection) {
     const img = await loadImageSrc(data.selection);

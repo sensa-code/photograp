@@ -10,7 +10,8 @@ import {
   defaultShapeStyle, renderShapeLayer, shapeToVectorPath, type ShapeKind as VectorShapeKind,
 } from '../core/shape';
 import type { Layer as LayerType } from '../core/types';
-import { defaultTextStyle, renderTextLayer } from '../core/text';
+import { defaultPathBinding, defaultTextStyle, renderTextLayer } from '../core/text';
+import { closestOnPath } from '../core/path';
 import { floodSelect } from './select';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
@@ -736,11 +737,18 @@ export class TextTool implements Tool {
     const style = defaultTextStyle();
     style.color = { ...e.app.foreground };
     style.text = '';
+    // Clicking on the active path starts type that runs along it, the way
+    // Photoshop's type tool does when the cursor is over a path.
+    const path = e.doc.activePath();
+    const near = path ? closestOnPath(path, { x: e.x, y: e.y }) : null;
+    if (path && near && near.distance <= 10 / e.zoom) {
+      style.onPath = { ...defaultPathBinding(path.id), offset: near.along };
+    }
     const layer = createTextLayer('文字', e.doc.width, e.doc.height, style);
     layer.x = Math.round(e.x);
     layer.y = Math.round(e.y);
     e.doc.insertLayerAbove(layer, e.doc.activeLayerId);
-    renderTextLayer(layer, e.doc.width, e.doc.height);
+    renderTextLayer(layer, e.doc.width, e.doc.height, e.doc.paths);
     e.doc.commit('新增文字圖層');
     textEditorHook?.(layer, e.doc, e.app);
     e.app.changed();

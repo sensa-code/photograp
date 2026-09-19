@@ -29,6 +29,8 @@ function editablePath(doc: PhotoDoc): { path: VectorPath; shapeLayer: boolean } 
 function afterEdit(doc: PhotoDoc): void {
   const layer = doc.activeLayer();
   if (layer?.kind === 'shape' && layer.shape) renderShapeLayer(layer, doc.width, doc.height);
+  const path = doc.activePath();
+  if (path) doc.refreshTextOnPath(path.id);
 }
 
 function ensurePath(doc: PhotoDoc): VectorPath {

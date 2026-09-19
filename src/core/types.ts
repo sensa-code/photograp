@@ -87,6 +87,19 @@ export interface TextStyle {
   letterSpacing: number;
   strokeWidth: number;
   strokeColor: RGB;
+  /** Set to lay the type along a document path instead of in a block. */
+  onPath?: TextPathBinding;
+}
+
+/** Where a type layer sits on a path. */
+export interface TextPathBinding {
+  pathId: string;
+  /** Extra distance along the path, on top of whatever `align` decides. */
+  offset: number;
+  /** Perpendicular shift; positive moves the type away from the curve. */
+  baselineShift: number;
+  /** Read along the other side of the curve, for type inside a circle. */
+  flip: boolean;
 }
 
 export type LayerKind = 'raster' | 'text' | 'adjustment' | 'group' | 'smart' | 'shape';

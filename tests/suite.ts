@@ -20,14 +20,17 @@ import {
 } from '../src/core/brush-presets';
 import { floodSelect } from '../src/tools/select';
 import { renderGradient, presetStops, shapePath } from '../src/tools/draw';
-import { defaultTextStyle, renderTextLayer, measureText } from '../src/core/text';
+import {
+  defaultPathBinding, defaultTextStyle, renderTextLayer, measureText,
+} from '../src/core/text';
+import { createTextLayer } from '../src/core/layer';
 import { serializeDocument, loadProject } from '../src/io/files';
 import { TOOLS } from '../src/tools';
 import { optionDefaults, type ToolPointer } from '../src/tools/types';
 import { app } from '../src/core/app';
 import {
-  anchorCount, createAnchor, createPath, hitTest, moveAnchor, moveHandle,
-  pathFromLoops, simplify, toPath2D,
+  anchorCount, closestOnPath, createAnchor, createPath, flattenPath, flattenSubPath,
+  hitTest, moveAnchor, moveHandle, pathFromLoops, pathPointAt, simplify, toPath2D,
 } from '../src/core/path';
 import {
   channelCoverage, createAlphaChannel, extractChannel, renderChannelView, setChannelCoverage,
@@ -1465,6 +1468,286 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- arc-length sampling and type on a path ----
+  group('路徑弧長取樣');
+  await test('直線子路徑的長度與取樣', () => {
+    const sp = {
+      closed: false,
+      anchors: [createAnchor(0, 0), createAnchor(100, 0), createAnchor(100, 50)],
+    };
+    const flat = flattenSubPath(sp);
+    near(flat.length, 150, 0.001, '總長度');
+    const mid = pathPointAt(flat, 50)!;
+    near(mid.x, 50, 0.001, '一半處的 X');
+    near(mid.y, 0, 0.001, '一半處的 Y');
+    near(mid.angle, 0, 0.001, '水平段的切線角');
+    const down = pathPointAt(flat, 125)!;
+    near(down.x, 100, 0.001, '垂直段的 X');
+    near(down.y, 25, 0.001, '垂直段的 Y');
+    near(down.angle, Math.PI / 2, 0.001, '垂直段的切線角');
+  });
+  await test('超過端點時沿切線延伸', () => {
+    const flat = flattenSubPath({
+      closed: false, anchors: [createAnchor(0, 0), createAnchor(100, 0)],
+    });
+    const over = pathPointAt(flat, 130)!;
+    near(over.x, 130, 0.001, '超出後繼續延伸');
+    const before = pathPointAt(flat, -20)!;
+    near(before.x, -20, 0.001, '起點之前也延伸');
+  });
+  await test('封閉路徑會回繞', () => {
+    const flat = flattenSubPath({
+      closed: true,
+      anchors: [createAnchor(0, 0), createAnchor(60, 0), createAnchor(60, 60), createAnchor(0, 60)],
+    });
+    near(flat.length, 240, 0.001, '正方形周長');
+    const a = pathPointAt(flat, 30)!;
+    const b = pathPointAt(flat, 30 + 240)!;
+    near(b.x, a.x, 0.001, '繞一圈後回到同一點');
+    near(b.y, a.y, 0.001, '繞一圈後回到同一點');
+  });
+  await test('圓弧弧長接近理論值', () => {
+    // A quarter circle of radius 100 drawn with the standard kappa handle.
+    const k = 0.5522847498307936 * 100;
+    const a = createAnchor(0, 0, true);
+    a.outX = k; a.outY = 0;
+    const b = createAnchor(100, 100, true);
+    b.inX = 100; b.inY = 100 - k;
+    const flat = flattenSubPath({ closed: false, anchors: [a, b] });
+    near(flat.length, (Math.PI / 2) * 100, 1, '四分之一圓弧長');
+    const mid = pathPointAt(flat, flat.length / 2)!;
+    // The midpoint of the arc sits at 45 degrees from the centre (0, 100).
+    near(Math.hypot(mid.x - 0, mid.y - 100), 100, 1.5, '弧中點到圓心的距離');
+  });
+  await test('flattenPath 以最長的子路徑優先', () => {
+    const path = createPath('p');
+    path.subpaths.push({ closed: false, anchors: [createAnchor(0, 0), createAnchor(10, 0)] });
+    path.subpaths.push({ closed: false, anchors: [createAnchor(0, 40), createAnchor(200, 40)] });
+    path.subpaths.push({ closed: false, anchors: [createAnchor(5, 5)] });
+    const flats = flattenPath(path);
+    assert(flats.length === 2, `只有兩條可用子路徑，實得 ${flats.length}`);
+    near(flats[0].length, 200, 0.001, '最長的子路徑應排在前面');
+  });
+  await test('closestOnPath 找得到最近的點與弧長', () => {
+    const path = createPath('p');
+    path.subpaths.push({ closed: false, anchors: [createAnchor(0, 0), createAnchor(100, 0)] });
+    const hit = closestOnPath(path, { x: 30, y: 12 })!;
+    near(hit.distance, 12, 0.001, '垂直距離');
+    near(hit.along, 30, 0.001, '落在路徑上的弧長');
+  });
+
+  group('文字沿路徑');
+  const linePath = (): ReturnType<typeof createPath> => {
+    const path = createPath('基準線');
+    path.subpaths.push({ closed: false, anchors: [createAnchor(20, 100), createAnchor(380, 100)] });
+    return path;
+  };
+  await test('綁定路徑後文字會畫在路徑上', () => {
+    const doc = PhotoDoc.createBlank('type-path', 400, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'HELLO';
+    style.fontSize = 40;
+    style.color = { r: 255, g: 0, b: 0 };
+    const layer = createTextLayer('文字', 400, 200, style);
+    layer.x = 0; layer.y = 0;
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const blockPixels = opaqueBounds(layer.surface!)!;
+    style.onPath = defaultPathBinding(path.id);
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const onPath = opaqueBounds(layer.surface!)!;
+    assert(layer.x === 0 && layer.y === 0, '沿路徑的文字圖層應固定在原點');
+    near(onPath.x, 20, 6, '文字應從路徑起點開始');
+    // The baseline sits on the path, so the glyphs stack just above y = 100.
+    assert(onPath.y < 100 && onPath.y + onPath.h <= 104, `字形應坐在基準線上方，實得 ${onPath.y}~${onPath.y + onPath.h}`);
+    assert(blockPixels.y !== onPath.y, '綁定前後位置應不同');
+  });
+  await test('起點與基線位移會搬動字形', () => {
+    const doc = PhotoDoc.createBlank('type-shift', 400, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'AB';
+    style.fontSize = 40;
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 400, 200, style);
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const base = opaqueBounds(layer.surface!)!;
+    style.onPath.offset = 100;
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const moved = opaqueBounds(layer.surface!)!;
+    near(moved.x - base.x, 100, 2, '起點位移應沿路徑往前');
+    style.onPath.offset = 0;
+    style.onPath.baselineShift = 30;
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const lifted = opaqueBounds(layer.surface!)!;
+    near(base.y - lifted.y, 30, 2, '基線位移應把字形推離曲線');
+  });
+  await test('對齊方式決定文字在路徑上的位置', () => {
+    const doc = PhotoDoc.createBlank('type-align', 400, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'MID';
+    style.fontSize = 32;
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 400, 200, style);
+    const boundsFor = (align: 'left' | 'center' | 'right'): { x: number; w: number } => {
+      style.align = align;
+      renderTextLayer(layer, 400, 200, doc.paths);
+      const b = opaqueBounds(layer.surface!)!;
+      return { x: b.x, w: b.w };
+    };
+    const left = boundsFor('left');
+    const center = boundsFor('center');
+    const right = boundsFor('right');
+    assert(left.x < center.x && center.x < right.x, '靠左 < 置中 < 靠右');
+    near(center.x + center.w / 2, 200, 6, '置中時應落在路徑中點');
+    assert(right.x + right.w <= 382, '靠右時不應超出路徑終點');
+  });
+  await test('翻轉會把文字換到曲線另一側', () => {
+    const doc = PhotoDoc.createBlank('type-flip', 400, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'FLIP';
+    style.fontSize = 36;
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 400, 200, style);
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const up = opaqueBounds(layer.surface!)!;
+    style.onPath.flip = true;
+    renderTextLayer(layer, 400, 200, doc.paths);
+    const down = opaqueBounds(layer.surface!)!;
+    assert(up.y + up.h <= 104, '未翻轉時字形在線上方');
+    assert(down.y >= 96, `翻轉後字形應在線下方，實得 ${down.y}`);
+  });
+  await test('文字會跟著彎曲的路徑走', () => {
+    const doc = PhotoDoc.createBlank('type-curve', 300, 300, 'white');
+    const path = createPath('弧');
+    const a = createAnchor(30, 250, true);
+    a.outX = 30; a.outY = 60;
+    const b = createAnchor(270, 250, true);
+    b.inX = 270; b.inY = 60;
+    path.subpaths.push({ closed: false, anchors: [a, b] });
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'ARCHED';
+    style.fontSize = 30;
+    style.align = 'center';
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 300, 300, style);
+    renderTextLayer(layer, 300, 300, doc.paths);
+    const b2 = opaqueBounds(layer.surface!)!;
+    // On an arch the middle letters ride higher than the ends. Scan a window
+    // rather than one column, which could land in the gap between two letters.
+    const topIn = (x0: number, w: number): number => {
+      const img = layer.surface!.ctx.getImageData(x0, 0, w, 300).data;
+      for (let y = 0; y < 300; y++) {
+        for (let x = 0; x < w; x++) if (img[(y * w + x) * 4 + 3] > 0) return y;
+      }
+      return 300;
+    };
+    const middle = topIn(140, 20);
+    const edge = topIn(b2.x, 20);
+    assert(middle < edge, `中間的字應比兩端高，實得 ${middle} vs ${edge}`);
+    assert(b2.w > 100, '文字應橫跨整道弧');
+  });
+  await test('沿路徑的文字不接受直接塗抹', () => {
+    const doc = PhotoDoc.createBlank('type-paint', 200, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'X';
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 200, 200, style);
+    renderTextLayer(layer, 200, 200, doc.paths);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    assert(PhotoDoc.regenerates(layer), '沿路徑的文字會重畫');
+    assert(doc.paintTarget() === null, '不應回傳繪圖目標');
+    assert(doc.paintBlockReason()?.includes('點陣化'), '應告訴使用者要先點陣化');
+  });
+  await test('編輯路徑會帶著文字一起走', () => {
+    const doc = PhotoDoc.createBlank('type-follow', 400, 300, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'FOLLOW';
+    style.fontSize = 30;
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 400, 300, style);
+    renderTextLayer(layer, 400, 300, doc.paths);
+    doc.layers.push(layer);
+    const before = opaqueBounds(layer.surface!)!;
+    // Drag the whole baseline down the canvas.
+    for (const a of path.subpaths[0].anchors) moveAnchor(a, a.x, a.y + 80);
+    doc.refreshTextOnPath(path.id);
+    const after = opaqueBounds(layer.surface!)!;
+    near(after.y - before.y, 80, 2, '文字應跟著路徑下移');
+  });
+  await test('影像尺寸改變時路徑與文字一起縮放', () => {
+    const doc = PhotoDoc.createBlank('type-resample', 400, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'SCALE';
+    style.fontSize = 30;
+    style.onPath = defaultPathBinding(path.id);
+    const layer = createTextLayer('文字', 400, 200, style);
+    renderTextLayer(layer, 400, 200, doc.paths);
+    doc.layers.push(layer);
+    doc.resampleTo(800, 400);
+    const anchors = doc.paths[0].subpaths[0].anchors;
+    near(anchors[0].x, 40, 0.01, '路徑控制點應等比放大');
+    near(anchors[0].y, 200, 0.01, '路徑控制點應等比放大');
+    const b = opaqueBounds(layer.surface!)!;
+    assert(b.y > 150 && b.y < 200, `文字應重新畫在新的基準線上，實得 ${b.y}`);
+  });
+  await test('沿路徑的文字可存檔並還原', async () => {
+    const doc = PhotoDoc.createBlank('type-io', 400, 200, 'white');
+    const path = linePath();
+    doc.setPath(path);
+    const style = defaultTextStyle();
+    style.text = 'SAVED';
+    style.fontSize = 28;
+    style.onPath = { ...defaultPathBinding(path.id), offset: 40, baselineShift: 6, flip: true };
+    const layer = createTextLayer('文字', 400, 200, style);
+    renderTextLayer(layer, 400, 200, doc.paths);
+    doc.layers.push(layer);
+    const back = await loadProject(serializeDocument(doc));
+    const restored = back.layers.find((l) => l.kind === 'text')!;
+    assert(restored?.text?.onPath, '應還原路徑綁定');
+    assert(restored.text!.onPath!.pathId === path.id, '路徑 id 應一致');
+    near(restored.text!.onPath!.offset, 40, 0.001, '起點位移');
+    near(restored.text!.onPath!.baselineShift, 6, 0.001, '基線位移');
+    assert(restored.text!.onPath!.flip, '翻轉設定');
+    const b = opaqueBounds(restored.surface!)!;
+    assert(b.w > 0, '還原後應重新畫出字形');
+  });
+  await test('文字工具點在路徑上會直接建立路徑文字', () => {
+    const doc = PhotoDoc.createBlank('type-tool', 400, 200, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    doc.setPath(linePath());
+    const tool = TOOLS.find((t) => t.id === 'text')!;
+    app.options(tool.id, optionDefaults(tool));
+    tool.down(pointer(doc, 150, 103));
+    const layer = doc.layers[doc.layers.length - 1];
+    assert(layer.kind === 'text', '應新增文字圖層');
+    assert(layer.text?.onPath, '點在路徑附近應綁定路徑');
+    near(layer.text!.onPath!.offset, 130, 1, '起點應落在點擊處');
+  });
+  await test('點在離路徑很遠的地方仍是一般文字', () => {
+    const doc = app.activeDoc()!;
+    const tool = TOOLS.find((t) => t.id === 'text')!;
+    tool.down(pointer(doc, 150, 180));
+    const layer = doc.layers[doc.layers.length - 1];
+    assert(!layer.text?.onPath, '離路徑太遠不應綁定');
+    near(layer.x, 150, 1, '一般文字仍以點擊處為原點');
   });
 
   // ---- vector shape layers ----

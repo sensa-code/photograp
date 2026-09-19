@@ -48,6 +48,7 @@ export class PathsPanel {
       return b;
     };
     return el('div', { class: 'panel-footer' },
+      mk('text', '使文字沿路徑', 'text.onPath'),
       mk('bucket', '以前景色填滿路徑', 'path.fill'),
       mk('brush', '以筆刷描邊路徑', 'path.stroke'),
       mk('marquee', '將路徑轉換為選取範圍', 'path.makeSelection'),

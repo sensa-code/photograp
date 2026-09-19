@@ -12,6 +12,7 @@ import { clonePath, type VectorPath } from './path';
 import type { Guide } from './guides';
 import { renderChannelView, type AlphaChannel, type ChannelView } from './channels';
 import { renderSmartLayer } from './smart';
+import { renderTextLayer } from './text';
 import { renderShapeLayer, transformPathPoints } from './shape';
 import {
   createQuickMask, quickMaskCoverage, quickMaskIsFull, renderQuickMaskOverlay, type QuickMask,
@@ -131,6 +132,22 @@ export class PhotoDoc {
     for (const l of this.allLayers()) {
       if (l.kind === 'smart' && l.smart) renderSmartLayer(l, this.width, this.height);
       else if (l.kind === 'shape' && l.shape) renderShapeLayer(l, this.width, this.height);
+      else if (l.kind === 'text' && l.text?.onPath) {
+        renderTextLayer(l, this.width, this.height, this.paths);
+      }
+    }
+  }
+
+  /**
+   * Re-render only the type bound to a path, which is what editing anchors
+   * needs: the glyphs have to follow the curve as it is dragged.
+   */
+  refreshTextOnPath(pathId?: string): void {
+    for (const l of this.allLayers()) {
+      const bind = l.kind === 'text' ? l.text?.onPath : undefined;
+      if (bind && (!pathId || bind.pathId === pathId)) {
+        renderTextLayer(l, this.width, this.height, this.paths);
+      }
     }
   }
 
@@ -198,9 +215,9 @@ export class PhotoDoc {
     if (this.editingMask && layer.mask) {
       return { layer, surface: layer.mask, slot: 'mask', offX: 0, offY: 0, clipToSelection: true };
     }
-    // Smart objects and shape layers re-render from their own source data,
-    // so direct paint would be thrown away. Rasterize first.
-    if (layer.kind === 'smart' || layer.kind === 'shape') return null;
+    // Smart objects, shape layers and type on a path re-render from their own
+    // source data, so direct paint would be thrown away. Rasterize first.
+    if (PhotoDoc.regenerates(layer)) return null;
     if (!layer.surface) return null;
     return {
       layer, surface: layer.surface, slot: 'pixels',
@@ -214,7 +231,7 @@ export class PhotoDoc {
    * next redraw. Destructive commands check this before touching a layer.
    */
   static regenerates(layer: Layer): boolean {
-    return layer.kind === 'shape' || layer.kind === 'smart';
+    return layer.kind === 'shape' || layer.kind === 'smart' || !!layer.text?.onPath;
   }
 
   /** Why `paintTarget()` came back empty, phrased for the user. */
@@ -224,6 +241,7 @@ export class PhotoDoc {
     if (!layer) return '請先選擇一個圖層';
     if (layer.locked) return '圖層已鎖定，請先解除鎖定';
     if (layer.kind === 'shape') return '形狀圖層請先點陣化才能塗抹';
+    if (layer.text?.onPath) return '沿路徑的文字圖層請先點陣化才能塗抹';
     if (layer.kind === 'smart') return '智慧型物件請先點陣化才能塗抹';
     if (layer.kind === 'group') return '群組圖層請先點陣化才能塗抹';
     if (!layer.surface) return '此圖層沒有可塗抹的像素';
@@ -393,6 +411,8 @@ export class PhotoDoc {
       ...g,
       pos: g.axis === 'v' ? g.pos * sx : g.pos * sy,
     }));
+    // Stored paths are document geometry too, and type may be riding on one.
+    for (const path of this.paths) transformPathPoints(path, (q) => ({ x: q.x * sx, y: q.y * sy }));
     this.resampleQuickMask(w, h, smooth);
     this.refreshGeneratedLayers();
   }
@@ -455,6 +475,9 @@ export class PhotoDoc {
     this.guides = this.guides
       .map((g) => ({ ...g, pos: g.pos + (g.axis === 'v' ? offsetX : offsetY) }))
       .filter((g) => g.pos >= 0 && g.pos <= (g.axis === 'v' ? w : h));
+    for (const path of this.paths) {
+      transformPathPoints(path, (q) => ({ x: q.x + offsetX, y: q.y + offsetY }));
+    }
     const qmSource = this.quickMask?.surface;
     if (qmSource) this.redrawQuickMask(w, h, (ctx) => ctx.drawImage(qmSource.canvas, offsetX, offsetY));
     this.refreshGeneratedLayers();
@@ -520,6 +543,10 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h);
+    if (smartOp) {
+      const map = canvasPointMap(smartOp, w, h);
+      for (const path of this.paths) transformPathPoints(path, map);
+    }
     const qmSource = this.quickMask?.surface;
     if (qmSource) {
       this.redrawQuickMask(w, h, (ctx) => { apply(ctx); ctx.drawImage(qmSource.canvas, 0, 0); });
