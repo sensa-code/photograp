@@ -160,6 +160,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       cmdEntry('select.all'),
       cmdEntry('select.none'),
       cmdEntry('select.inverse'),
+      cmdEntry('select.refineEdge'),
       sep,
       sub('修改', [
         cmdEntry('select.border'),

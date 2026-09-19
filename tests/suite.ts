@@ -6,6 +6,9 @@ import { hexToRgb, hslToRgb, hsvToRgb, rgbToHex, rgbToHsl, rgbToHsv } from '../s
 import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
 import type { Rect } from '../src/core/geometry';
+import {
+  defaultRefine, refineIsIdentity, refineMask, scaleMask,
+} from '../src/core/refine';
 import type { Layer } from '../src/core/types';
 import { compositeLayers } from '../src/core/compositor';
 import { createAdjustmentLayer, createRasterLayer, duplicateLayer } from '../src/core/layer';
@@ -1478,6 +1481,127 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- select and mask ----
+  group('調整選取邊緣');
+  /** A hard-edged square of coverage, the simplest thing to measure. */
+  const squareMask = (w: number, h: number, x0: number, y0: number, size: number): Uint8Array => {
+    const m = new Uint8Array(w * h);
+    for (let y = y0; y < y0 + size; y++) {
+      for (let x = x0; x < x0 + size; x++) m[y * w + x] = 255;
+    }
+    return m;
+  };
+  const coverage = (m: Uint8Array): number => {
+    let n = 0;
+    for (let i = 0; i < m.length; i++) n += m[i];
+    return n / 255;
+  };
+
+  await test('預設設定不改變任何東西', () => {
+    const m = squareMask(60, 60, 20, 20, 20);
+    assert(refineIsIdentity(defaultRefine()), '預設應是空操作');
+    const out = refineMask(m, 60, 60, defaultRefine());
+    assert(out !== m, '應回傳新的陣列');
+    near(coverage(out), coverage(m), 0.001, '覆蓋率應不變');
+  });
+  await test('不會改到傳進來的陣列', () => {
+    const m = squareMask(60, 60, 20, 20, 20);
+    const before = coverage(m);
+    refineMask(m, 60, 60, { smooth: 4, feather: 6, contrast: 40, shift: 3 });
+    near(coverage(m), before, 0.001, '原陣列應保持原樣');
+  });
+  await test('移動邊緣會擴大或縮小選取範圍', () => {
+    const m = squareMask(80, 80, 30, 30, 20);
+    const grown = refineMask(m, 80, 80, { ...defaultRefine(), shift: 5 });
+    const shrunk = refineMask(m, 80, 80, { ...defaultRefine(), shift: -5 });
+    assert(coverage(grown) > coverage(m), '正值應讓選取變大');
+    assert(coverage(shrunk) < coverage(m), '負值應讓選取變小');
+    // A 20px square grown by 5 on each side becomes 30px across.
+    near(coverage(grown), 30 * 30, 8, '擴大後的面積');
+    near(coverage(shrunk), 10 * 10, 8, '縮小後的面積');
+  });
+  await test('羽化會把硬邊緣變成漸層', () => {
+    const m = squareMask(80, 80, 20, 20, 40);
+    const soft = refineMask(m, 80, 80, { ...defaultRefine(), feather: 6 });
+    const edge = soft[40 * 80 + 20];
+    assert(edge > 20 && edge < 235, `邊緣應變成中間值，實得 ${edge}`);
+    assert(soft[40 * 80 + 40] > 245, '中心應仍然完全選取');
+    assert(soft[5 * 80 + 5] < 10, '遠處應仍然沒被選到');
+  });
+  await test('對比會把羽化過的邊緣拉回來', () => {
+    const m = squareMask(80, 80, 20, 20, 40);
+    const soft = refineMask(m, 80, 80, { ...defaultRefine(), feather: 8 });
+    const crisp = refineMask(m, 80, 80, { ...defaultRefine(), feather: 8, contrast: 100 });
+    const midValues = (x: Uint8Array): number => {
+      let n = 0;
+      for (let i = 0; i < x.length; i++) if (x[i] > 30 && x[i] < 225) n++;
+      return n;
+    };
+    assert(midValues(crisp) < midValues(soft), '高對比應大幅減少中間值');
+    near(coverage(crisp), coverage(soft), 400, '總面積應大致相當');
+  });
+  await test('平滑會磨掉突出來的雜訊', () => {
+    const w = 80, h = 80;
+    const m = squareMask(w, h, 20, 20, 40);
+    // A one-pixel spike sticking out of the square.
+    m[10 * w + 40] = 255;
+    const smoothed = refineMask(m, w, h, { ...defaultRefine(), smooth: 4 });
+    assert(smoothed[10 * w + 40] < 60, `孤立的雜訊應被磨掉，實得 ${smoothed[10 * w + 40]}`);
+    assert(smoothed[40 * w + 40] > 200, '主體應保留');
+  });
+  await test('依序套用：平滑、羽化、對比、移動邊緣', () => {
+    const m = squareMask(80, 80, 20, 20, 40);
+    const all = refineMask(m, 80, 80, { smooth: 2, feather: 4, contrast: 50, shift: 3 });
+    assert(coverage(all) > coverage(m), '全部套用後應因為移動邊緣而變大');
+    assert(all.length === m.length, '尺寸不變');
+  });
+  await test('縮放過的半徑與全尺寸結果相當', () => {
+    const w = 120, h = 120;
+    const m = squareMask(w, h, 30, 30, 60);
+    const settings = { ...defaultRefine(), shift: 8 };
+    const fullOut = refineMask(m, w, h, settings, 1);
+    // The preview path: half-size mask, half-size radii.
+    const small = scaleMask(m, w, h, w / 2, h / 2);
+    const smallOut = refineMask(small, w / 2, h / 2, settings, 0.5);
+    const fullPct = coverage(fullOut) / (w * h);
+    const smallPct = coverage(smallOut) / ((w / 2) * (h / 2));
+    near(smallPct, fullPct, 0.02, '預視的覆蓋比例應與實際結果相近');
+  });
+  await test('scaleMask 保留大致的覆蓋比例', () => {
+    const w = 100, h = 100;
+    const m = squareMask(w, h, 20, 20, 40);
+    const small = scaleMask(m, w, h, 50, 50);
+    assert(small.length === 2500, '尺寸應縮半');
+    near(coverage(small) / 2500, coverage(m) / (w * h), 0.02, '覆蓋比例應相近');
+  });
+  await test('選取範圍可以換成調整過的結果', () => {
+    const doc = PhotoDoc.createBlank('refine-doc', 80, 80, 'white');
+    const path = new Path2D();
+    path.rect(20, 20, 40, 40);
+    doc.selection.combine(rasterizePath(path, 80, 80), 'replace');
+    const before = doc.selection.bounds()!;
+    const refined = refineMask(doc.selection.mask!, 80, 80, { ...defaultRefine(), shift: 6 });
+    doc.selection.combine(refined, 'replace');
+    const after = doc.selection.bounds()!;
+    assert(after.w > before.w && after.h > before.h, '邊界應變大');
+    near(after.x, before.x - 6, 1.5, '左邊應往外移');
+  });
+  await test('輸出為圖層遮色片會把覆蓋率轉成灰階', () => {
+    const doc = PhotoDoc.createBlank('refine-mask', 60, 60, 'white');
+    const path = new Path2D();
+    path.rect(10, 10, 30, 30);
+    doc.selection.combine(rasterizePath(path, 60, 60), 'replace');
+    const refined = refineMask(doc.selection.mask!, 60, 60, { ...defaultRefine(), feather: 4 });
+    const layer = doc.layers[0];
+    layer.mask = maskFromCoverage(refined, 60, 60);
+    layer.maskEnabled = true;
+    assert(layer.mask, '應建立遮色片');
+    assert(pixel(layer.mask!, 25, 25)[0] > 200, '選取內部應是白的');
+    assert(pixel(layer.mask!, 2, 2)[0] < 40, '選取外部應是黑的');
+    const edge = pixel(layer.mask!, 10, 25)[0];
+    assert(edge > 20 && edge < 235, `羽化的邊緣應是灰的，實得 ${edge}`);
   });
 
   // ---- align and distribute ----

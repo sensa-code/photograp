@@ -21,6 +21,7 @@ import { askSnapshotName } from './panels/history';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
 import { loadImageFile, pickFiles } from '../io/files';
 import { liquifyDialog } from './dialogs/liquify';
+import { refineEdgeDialog } from './dialogs/refine';
 import { cmd, type Cmd } from './command-types';
 import { el, on } from './dom';
 import {
@@ -644,6 +645,12 @@ export const VECTOR_COMMANDS: Cmd[] = [
   snapToggle('view.snapDocument', '靠齊至文件邊界', 'toDocument'),
   snapToggle('view.snapLayers', '靠齊至圖層', 'toLayers'),
   cmd('view.gridSize', '格點間距…', (a) => gridSizeDialog(a)),
+
+  // ---- select and mask ----
+  cmd('select.refineEdge', '選取並遮住…', (a) => { void refineEdgeDialog(a); }, {
+    shortcut: 'Ctrl+Alt+R',
+    enabled: hasSelection,
+  }),
 
   // ---- history snapshots ----
   cmd('history.snapshot', '建立快照…', (a) => { void takeSnapshot(a); }, {
