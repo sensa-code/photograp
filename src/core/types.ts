@@ -211,6 +211,23 @@ export interface LayerEffects {
   overlay: OverlayEffect;
 }
 
+/** Which channel the blend ranges compare. */
+export type BlendRangeChannel = 'gray' | 'r' | 'g' | 'b';
+
+/**
+ * One blend range: the layer is hidden below `b0` and above `w1`, and fades
+ * over `b0..b1` and `w0..w1`. Wide open is 0/0 and 255/255.
+ */
+export interface BlendBand { b0: number; b1: number; w0: number; w1: number }
+
+export interface BlendIf {
+  channel: BlendRangeChannel;
+  /** Judged on the layer's own pixels. */
+  self: BlendBand;
+  /** Judged on whatever is already composited underneath. */
+  under: BlendBand;
+}
+
 export interface Layer {
   id: string;
   name: string;
@@ -218,6 +235,10 @@ export interface Layer {
   visible: boolean;
   locked: boolean;
   opacity: number;          // 0..1
+  /** Opacity of the layer's own pixels only; effects keep their strength. */
+  fill: number;             // 0..1
+  /** Hide parts of the layer by tone, in its own pixels or those below. */
+  blendIf: BlendIf;
   blend: BlendMode;
   /** Offset of the layer surface within the document. */
   x: number;

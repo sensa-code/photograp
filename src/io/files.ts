@@ -1,5 +1,6 @@
 import { PhotoDoc } from '../core/document';
-import type { Layer, LayerEffects, SmartFilterEntry } from '../core/types';
+import type { BlendIf, Layer, LayerEffects, SmartFilterEntry } from '../core/types';
+import { normalizeBlendIf } from '../core/blend-range';
 import { createSurface, type Surface } from '../core/surface';
 import { defaultEffects, uid } from '../core/layer';
 import { Selection } from '../core/selection';
@@ -95,6 +96,8 @@ interface SerializedLayer {
   visible: boolean;
   locked: boolean;
   opacity: number;
+  fill?: number;
+  blendIf?: Partial<BlendIf>;
   blend: string;
   x: number;
   y: number;
@@ -164,7 +167,8 @@ const encode = (s: Surface | null): string | null => (s ? s.canvas.toDataURL('im
 function serializeLayer(l: Layer): SerializedLayer {
   return {
     id: l.id, name: l.name, kind: l.kind, visible: l.visible, locked: l.locked,
-    opacity: l.opacity, blend: l.blend, x: l.x, y: l.y, clipped: l.clipped,
+    opacity: l.opacity, fill: l.fill, blendIf: l.blendIf,
+    blend: l.blend, x: l.x, y: l.y, clipped: l.clipped,
     maskEnabled: l.maskEnabled, maskLinked: l.maskLinked,
     surface: encode(l.surface), mask: encode(l.mask),
     text: l.text, adjustment: l.adjustment, effects: l.effects,
@@ -280,6 +284,9 @@ async function deserializeLayer(s: SerializedLayer, w: number, h: number): Promi
     visible: s.visible,
     locked: s.locked,
     opacity: s.opacity,
+    // Projects saved before advanced blending simply have neither.
+    fill: typeof s.fill === 'number' ? s.fill : 1,
+    blendIf: normalizeBlendIf(s.blendIf),
     blend: s.blend as Layer['blend'],
     x: s.x,
     y: s.y,

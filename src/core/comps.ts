@@ -1,6 +1,7 @@
 import { uid } from './ids';
 import { defaultEffects } from './layer';
-import type { BlendMode, Layer, LayerEffects } from './types';
+import type { BlendIf, BlendMode, Layer, LayerEffects } from './types';
+import { cloneBlendIf, normalizeBlendIf } from './blend-range';
 
 /**
  * A layer comp remembers how the document looked, not what it contained:
@@ -13,6 +14,8 @@ export interface CompLayerState {
   x: number;
   y: number;
   opacity: number;
+  fill: number;
+  blendIf: BlendIf;
   blend: BlendMode;
   effects: LayerEffects;
 }
@@ -44,7 +47,9 @@ export function cloneComp(c: LayerComp): LayerComp {
     name: c.name,
     note: c.note,
     capture: { ...c.capture },
-    layers: c.layers.map((l) => ({ ...l, effects: cloneEffects(l.effects) })),
+    layers: c.layers.map((l) => ({
+      ...l, blendIf: cloneBlendIf(l.blendIf), effects: cloneEffects(l.effects),
+    })),
   };
 }
 
@@ -71,6 +76,8 @@ export function captureComp(
       x: l.x,
       y: l.y,
       opacity: l.opacity,
+      fill: l.fill,
+      blendIf: cloneBlendIf(l.blendIf),
       blend: l.blend,
       effects: cloneEffects(l.effects),
     })),
@@ -114,6 +121,8 @@ export function applyComp(layers: Layer[], comp: LayerComp): ApplyResult {
     }
     if (comp.capture.appearance) {
       layer.opacity = state.opacity;
+      layer.fill = state.fill;
+      layer.blendIf = cloneBlendIf(state.blendIf);
       layer.blend = state.blend;
       layer.effects = cloneEffects(state.effects);
     }
@@ -142,6 +151,8 @@ export function normalizeComp(c: Partial<LayerComp>): LayerComp | null {
         x: Number(l.x) || 0,
         y: Number(l.y) || 0,
         opacity: typeof l.opacity === 'number' ? l.opacity : 1,
+        fill: typeof l.fill === 'number' ? l.fill : 1,
+        blendIf: normalizeBlendIf(l.blendIf),
         blend: l.blend ?? 'normal',
         // Merge onto the defaults so a comp saved before an effect existed
         // still restores, with the new effect simply switched off.

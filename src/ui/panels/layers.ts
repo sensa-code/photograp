@@ -66,6 +66,7 @@ export class LayersPanel {
   private search = '';
   private kindFilter = 'all';
   private opacityInput!: HTMLInputElement;
+  private fillInput!: HTMLInputElement;
   private blendSelect!: HTMLSelectElement;
   private dragId: string | null = null;
 
@@ -141,23 +142,36 @@ export class LayersPanel {
       this.app.changed();
     });
 
-    this.opacityInput = el('input', { type: 'range', min: 0, max: 100, value: 100 }) as HTMLInputElement;
-    const readout = el('span', { class: 'val', text: '100%' });
-    const applyOpacity = (commit: boolean): void => {
-      const doc = this.app.activeDoc();
-      const layer = doc?.activeLayer();
-      if (!doc || !layer) return;
-      layer.opacity = Number(this.opacityInput.value) / 100;
-      readout.textContent = `${this.opacityInput.value}%`;
-      if (commit) doc.commit('變更不透明度'); else doc.touch();
-      this.app.changed();
+    /** A percentage slider bound to one field of the active layer. */
+    const percentRow = (
+      label: string, write: (l: Layer, v: number) => void,
+    ): { input: HTMLInputElement; node: HTMLElement } => {
+      const input = el('input', { type: 'range', min: 0, max: 100, value: 100 }) as HTMLInputElement;
+      const readout = el('span', { class: 'val', text: '100%' });
+      const run = (commit: boolean): void => {
+        const doc = this.app.activeDoc();
+        const layer = doc?.activeLayer();
+        if (!doc || !layer) return;
+        write(layer, Number(input.value) / 100);
+        readout.textContent = `${input.value}%`;
+        if (commit) doc.commit(label); else doc.touch();
+        this.app.changed();
+      };
+      on(input, 'input', () => run(false));
+      on(input, 'change', () => run(true));
+      return { input, node: el('div', { class: 'slider' }, input, readout) };
     };
-    on(this.opacityInput, 'input', () => applyOpacity(false));
-    on(this.opacityInput, 'change', () => applyOpacity(true));
+
+    const opacity = percentRow('變更不透明度', (l, v) => { l.opacity = v; });
+    this.opacityInput = opacity.input;
+    const fill = percentRow('變更填滿不透明度', (l, v) => { l.fill = v; });
+    this.fillInput = fill.input;
+    fill.node.style.gridColumn = '2 / -1';
 
     return el('div', { class: 'layer-controls' },
       el('label', { text: '混合' }), this.blendSelect,
-      el('label', { text: '不透明' }), el('div', { class: 'slider' }, this.opacityInput, readout));
+      el('label', { text: '不透明' }), opacity.node,
+      el('label', { text: '填滿', title: '只調圖層本身的像素，圖層樣式不受影響' }), fill.node);
   }
 
   private footer(): HTMLElement {
@@ -362,9 +376,14 @@ export class LayersPanel {
     const active = doc.activeLayer();
     if (active) {
       this.blendSelect.value = active.blend;
-      this.opacityInput.value = String(Math.round(active.opacity * 100));
-      const readout = this.opacityInput.parentElement?.querySelector('.val');
-      if (readout) readout.textContent = `${Math.round(active.opacity * 100)}%`;
+      const show = (input: HTMLInputElement, value: number): void => {
+        const pct = Math.round(value * 100);
+        input.value = String(pct);
+        const readout = input.parentElement?.querySelector('.val');
+        if (readout) readout.textContent = `${pct}%`;
+      };
+      show(this.opacityInput, active.opacity);
+      show(this.fillInput, active.fill);
     }
   }
 }

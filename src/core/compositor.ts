@@ -1,6 +1,7 @@
 import type { Layer } from './types';
 import { createSurface, type Surface } from './surface';
 import { blendSurface } from './blend';
+import { applyBlendIf } from './blend-range';
 import { applyAdjustment } from '../filters/adjustments';
 import { gaussianBlur } from '../filters/blur';
 import { rgbCss } from './color';
@@ -66,11 +67,13 @@ function overlayFill(layer: Layer, src: Surface, opt: CompositeOptions): Surface
     fill.ctx.fillRect(0, 0, fill.w, fill.h);
   }
 
-  // No clipping here: the caller draws with source-atop, which already
-  // limits the fill to the layer. Clipping as well would apply the layer's
-  // alpha twice and leave a semi-transparent layer only half covered.
+  // Uncut: the caller cuts it to the layer's silhouette, and doing it here
+  // as well would apply the layer's alpha twice and leave a semi-transparent
+  // layer only half covered.
   return fill;
 }
+
+const clamp01 = (v: number): number => (v >= 1 ? 1 : v <= 0 ? 0 : v);
 
 /** The layer's silhouette: its own alpha, with the colour thrown away. */
 function silhouette(
@@ -174,22 +177,34 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
   }
 
   if (e.stroke.enabled && e.stroke.width > 0) {
-    const sil = createSurface(opt.width, opt.height);
-    drawContent(sil.ctx);
-    sil.ctx.globalCompositeOperation = 'source-in';
-    sil.ctx.fillStyle = rgbCss(e.stroke.color);
-    sil.ctx.fillRect(0, 0, sil.w, sil.h);
+    const edge = createSurface(opt.width, opt.height);
+    drawContent(edge.ctx);
+    edge.ctx.globalCompositeOperation = 'source-in';
+    edge.ctx.fillStyle = rgbCss(e.stroke.color);
+    edge.ctx.fillRect(0, 0, edge.w, edge.h);
     out.ctx.save();
     out.ctx.globalAlpha = e.stroke.alpha;
     const steps = 24;
     for (let i = 0; i < steps; i++) {
       const a = (i / steps) * Math.PI * 2;
-      out.ctx.drawImage(sil.canvas, Math.cos(a) * e.stroke.width, Math.sin(a) * e.stroke.width);
+      out.ctx.drawImage(edge.canvas, Math.cos(a) * e.stroke.width, Math.sin(a) * e.stroke.width);
     }
     out.ctx.restore();
   }
 
-  drawContent(out.ctx);
+  // Everything inside the layer's own shape is built in one surface and laid
+  // down as a unit. The effects are composited source-atop, so they colour
+  // the shape without ever widening it; the fill opacity then thins that
+  // whole interior on the way out.
+  const inside = createSurface(opt.width, opt.height);
+  drawContent(inside.ctx);
+  /** Emboss reaches past the edge, so it is held back until the clip is done. */
+  let spill: { surface: Surface; alpha: number } | null = null;
+  /** How strongly the effects paint the interior, whatever the fill does. */
+  let effectStrength = 0;
+  const counts = (on: boolean, alpha: number): void => {
+    if (on && alpha > effectStrength) effectStrength = alpha;
+  };
 
   if (e.innerShadow.enabled || e.innerGlow.enabled || e.bevel.enabled) {
     const sil = silhouette(opt, drawContent);
@@ -217,10 +232,10 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
       shade.ctx.globalCompositeOperation = 'destination-in';
       shade.ctx.drawImage(sil.canvas, 0, 0);
 
-      out.ctx.save();
-      out.ctx.globalCompositeOperation = 'source-atop';
-      out.ctx.drawImage(shade.canvas, 0, 0);
-      out.ctx.restore();
+      inside.ctx.save();
+      inside.ctx.globalCompositeOperation = 'source-atop';
+      inside.ctx.drawImage(shade.canvas, 0, 0);
+      inside.ctx.restore();
     };
 
     if (e.innerShadow.enabled) {
@@ -229,21 +244,27 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
         `rgba(${c.r},${c.g},${c.b},${e.innerShadow.alpha})`,
         e.innerShadow.blur, e.innerShadow.dx, e.innerShadow.dy, 1,
       );
+      counts(true, e.innerShadow.alpha);
     }
     if (e.innerGlow.enabled) {
       const c = e.innerGlow.color;
       castInward(`rgba(${c.r},${c.g},${c.b},${e.innerGlow.alpha})`, e.innerGlow.blur, 0, 0, 3);
+      counts(true, e.innerGlow.alpha);
     }
     if (e.bevel.enabled && e.bevel.alpha > 0) {
       const shading = bevelShading(layer, opt, sil);
       if (shading) {
-        out.ctx.save();
         // Emboss spills past the edge, so it draws over everything; a plain
         // bevel stays inside the layer.
-        if (!e.bevel.emboss) out.ctx.globalCompositeOperation = 'source-atop';
-        out.ctx.globalAlpha = e.bevel.alpha;
-        out.ctx.drawImage(shading.canvas, 0, 0);
-        out.ctx.restore();
+        if (e.bevel.emboss) spill = { surface: shading, alpha: e.bevel.alpha };
+        else {
+          inside.ctx.save();
+          inside.ctx.globalCompositeOperation = 'source-atop';
+          inside.ctx.globalAlpha = e.bevel.alpha;
+          inside.ctx.drawImage(shading.canvas, 0, 0);
+          inside.ctx.restore();
+          counts(true, e.bevel.alpha);
+        }
       }
     }
   }
@@ -251,14 +272,32 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
   if (e.overlay.enabled && e.overlay.alpha > 0) {
     const fill = overlayFill(layer, src, opt);
     if (fill) {
-      out.ctx.save();
-      // source-atop keeps the destination alpha, so a semi-transparent layer does
-      // not become more opaque just because an overlay was switched on.
-      out.ctx.globalCompositeOperation = 'source-atop';
-      out.ctx.globalAlpha = e.overlay.alpha;
-      out.ctx.drawImage(fill.canvas, 0, 0);
-      out.ctx.restore();
+      inside.ctx.save();
+      // source-atop keeps the destination alpha, so a semi-transparent layer
+      // does not become more opaque just because an overlay was switched on.
+      inside.ctx.globalCompositeOperation = 'source-atop';
+      inside.ctx.globalAlpha = e.overlay.alpha;
+      inside.ctx.drawImage(fill.canvas, 0, 0);
+      inside.ctx.restore();
+      counts(true, e.overlay.alpha);
     }
+  }
+
+  // Fill opacity thins the layer's own pixels but not its styling, so an
+  // effect painted across the shape holds the interior up on its own. That
+  // is what leaves a colour overlay visible at 0% fill. The strength is per
+  // layer rather than per pixel, so a partly transparent effect over faded
+  // pixels lands between the two rather than exactly on Photoshop's result.
+  out.ctx.save();
+  out.ctx.globalAlpha = Math.max(clamp01(layer.fill), effectStrength);
+  out.ctx.drawImage(inside.canvas, 0, 0);
+  out.ctx.restore();
+
+  if (spill) {
+    out.ctx.save();
+    out.ctx.globalAlpha = spill.alpha;
+    out.ctx.drawImage(spill.surface.canvas, 0, 0);
+    out.ctx.restore();
   }
 
   if (mask && layer.maskEnabled) {
@@ -304,7 +343,9 @@ function applyAdjustmentLayer(
     adjusted.ctx.restore();
   }
 
-  blendSurface(acc, adjusted, layer.blend, layer.opacity);
+  applyBlendIf(adjusted, acc, layer.blendIf);
+  // An adjustment has no pixels either, so fill doubles as opacity.
+  blendSurface(acc, adjusted, layer.blend, layer.opacity * clamp01(layer.fill));
 }
 
 /**
@@ -370,6 +411,7 @@ export function compositeLayers(
           cs.ctx.globalCompositeOperation = 'destination-in';
           cs.ctx.drawImage(clipMask.canvas, 0, 0);
           cs.ctx.restore();
+          applyBlendIf(cs, body, c.blendIf);
           blendSurface(body, cs, c.blend, c.opacity);
         }
       }
@@ -379,7 +421,15 @@ export function compositeLayers(
       body.ctx.restore();
     }
 
-    blendSurface(acc, body, layer.blend, layer.opacity);
+    // Blend ranges are judged against what is already underneath, so they
+    // belong here rather than inside the layer's own render. A group has no
+    // pixels of its own for the fill to thin, so there it acts as a second
+    // opacity, which is what Photoshop does too.
+    applyBlendIf(body, acc, layer.blendIf);
+    const alpha = layer.kind === 'group'
+      ? layer.opacity * clamp01(layer.fill)
+      : layer.opacity;
+    blendSurface(acc, body, layer.blend, alpha);
   }
   return acc;
 }

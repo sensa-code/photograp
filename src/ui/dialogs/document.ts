@@ -9,6 +9,8 @@ import {
 } from '../../core/patterns';
 import { cloneStops, loadGradients } from '../../core/gradients';
 import { defaultEffects } from '../../core/layer';
+import { cloneBlendIf, defaultBlendIf, normalizeBlendIf } from '../../core/blend-range';
+import type { BlendBand } from '../../core/types';
 import {
   cloneEffects, createStyle, describeStyle, loadStyles, saveStyles,
 } from '../../core/styles';
@@ -456,10 +458,31 @@ export async function layerStyleDialog(app: App): Promise<void> {
   const layer = doc?.activeLayer();
   if (!doc || !layer) return;
   const e = JSON.parse(JSON.stringify(layer.effects)) as typeof layer.effects;
+  // Blending options are edited alongside the effects and restored together.
+  const blend = { fill: layer.fill, ranges: cloneBlendIf(layer.blendIf) };
   const apply = (): void => {
     layer.effects = JSON.parse(JSON.stringify(e));
+    layer.fill = blend.fill;
+    layer.blendIf = cloneBlendIf(blend.ranges);
     doc.touch();
     app.changed();
+  };
+
+  /** The two handles of one end of a band, side by side. */
+  const handlePair = (
+    band: BlendBand, lo: keyof BlendBand, hi: keyof BlendBand,
+  ): HTMLElement => el('div', { style: 'display:flex;gap:6px;align-items:center' },
+    sliderControl(band[lo], 0, 255, 1, (v) => { band[lo] = v; apply(); }, '', 92),
+    sliderControl(band[hi], 0, 255, 1, (v) => { band[hi] = v; apply(); }, '', 92));
+
+  const resetRangesBtn = (): HTMLElement => {
+    const b = el('button', { class: 'btn', text: '\u91cd\u8a2d\u6df7\u5408\u7bc4\u570d' });
+    on(b, 'click', () => {
+      blend.ranges = defaultBlendIf();
+      apply();
+      rebuildBody();
+    });
+    return b;
   };
 
   const section = (title: string, enabled: boolean, set: (v: boolean) => void, rows: HTMLElement): HTMLElement =>
@@ -469,7 +492,39 @@ export async function layerStyleDialog(app: App): Promise<void> {
 
   const body = el('div', { style: 'display:grid;gap:10px;min-width:380px' });
   const rebuildBody = (): void => { rebuild(body, [...sections()]); };
+
+  const blendRows = (): HTMLElement => {
+    const r = blend.ranges;
+    return formGrid([
+      ['\u586b\u6eff\u4e0d\u900f\u660e\u5ea6', sliderControl(blend.fill * 100, 0, 100, 1, (v) => {
+        blend.fill = v / 100; apply();
+      }, '%', 130)],
+      [null, el('div', {
+        class: 'hint',
+        text: '\u586b\u6eff\u53ea\u8abf\u5716\u5c64\u672c\u8eab\u7684\u50cf\u7d20\uff0c\u5716\u5c64\u6a23\u5f0f\u4e0d\u53d7\u5f71\u97ff\u3002',
+      })],
+      ['\u6bd4\u8f03\u8272\u7248', segmentedControl(r.channel, [
+        { value: 'gray', label: '\u7070\u968e' },
+        { value: 'r', label: 'R' },
+        { value: 'g', label: 'G' },
+        { value: 'b', label: 'B' },
+      ], (v) => { r.channel = v as typeof r.channel; apply(); })],
+      ['\u672c\u5716\u5c64\u6697\u90e8', handlePair(r.self, 'b0', 'b1')],
+      ['\u672c\u5716\u5c64\u4eae\u90e8', handlePair(r.self, 'w0', 'w1')],
+      ['\u4e0b\u9762\u5716\u5c64\u6697\u90e8', handlePair(r.under, 'b0', 'b1')],
+      ['\u4e0b\u9762\u5716\u5c64\u4eae\u90e8', handlePair(r.under, 'w0', 'w1')],
+      [null, el('div', {
+        class: 'hint',
+        text: '\u5169\u500b\u6ed1\u687f\u662f\u6de1\u51fa\u7684\u8d77\u9ede\u8207\u7d42\u9ede\uff1b\u5b83\u5011\u91cd\u758a\u6642\u5c31\u662f\u786c\u908a\u3002\u78ba\u5b9a\u5f8c\u6703\u81ea\u52d5\u6392\u5e8f\u3002',
+      })],
+      [null, resetRangesBtn()],
+    ]);
+  };
+
   const sections = (): HTMLElement[] => [
+    el('div', { style: 'border:1px solid var(--line);border-radius:5px;padding:9px;display:grid;gap:8px' },
+      el('div', { style: 'font-weight:600', text: '進階混合' }),
+      blendRows()),
     section('陰影', e.dropShadow.enabled, (v) => { e.dropShadow.enabled = v; }, formGrid([
       ['顏色', colorChip(e.dropShadow.color, (c) => { e.dropShadow.color = c; apply(); })],
       ['不透明度', sliderControl(e.dropShadow.alpha * 100, 0, 100, 1, (v) => { e.dropShadow.alpha = v / 100; apply(); }, '%', 130)],
@@ -634,13 +689,19 @@ export async function layerStyleDialog(app: App): Promise<void> {
   };
 
   const before = JSON.parse(JSON.stringify(layer.effects)) as typeof layer.effects;
+  const beforeBlend = { fill: layer.fill, ranges: cloneBlendIf(layer.blendIf) };
   rebuildBody();
   const res = await openModal({ title: '圖層樣式', body });
   if (res === 'ok') {
     apply();
+    // Handles dragged past each other are put back in order once, here,
+    // rather than fighting the user mid-drag.
+    layer.blendIf = normalizeBlendIf(layer.blendIf);
     doc.commit('圖層樣式');
   } else {
     layer.effects = before;
+    layer.fill = beforeBlend.fill;
+    layer.blendIf = beforeBlend.ranges;
     doc.touch();
   }
   app.changed();

@@ -27,7 +27,11 @@ import {
 import type { Layer } from '../src/core/types';
 import { compositeLayers } from '../src/core/compositor';
 import {
-  createAdjustmentLayer, createRasterLayer, defaultEffects, duplicateLayer,
+  applyBlendIf, bandFactor, blendIfIsDefault, cloneBlendIf, defaultBlendIf,
+  describeBlendIf, fullBand, normalizeBand, normalizeBlendIf,
+} from '../src/core/blend-range';
+import {
+  createAdjustmentLayer, createGroupLayer, createRasterLayer, defaultEffects, duplicateLayer,
 } from '../src/core/layer';
 import {
   BUILTIN_STYLES, cloneEffects, createStyle, describeStyle, loadStyles,
@@ -4458,6 +4462,221 @@ async function run(): Promise<void> {
     const snaps = doc.history.snapshots.length;
     mixStroke(doc, { x: 20, y: 30 }, { x: 60, y: 30 });
     assert(doc.history.snapshots.length === snaps, '不應留下步驟');
+  });
+
+  // ---- advanced blending ----
+  group('進階混合');
+  await test('預設的混合範圍什麼都不蔽', () => {
+    const r = defaultBlendIf();
+    assert(blendIfIsDefault(r), '預設應視為未使用');
+    assert(blendIfIsDefault(undefined), '沒有範圍也算預設');
+    for (const v of [0, 1, 128, 254, 255]) {
+      near(bandFactor(v, fullBand()), 1, 0.0001, `${v} 應完全顯示`);
+    }
+    r.self.b0 = 10;
+    assert(!blendIfIsDefault(r), '動過就不是預設了');
+  });
+  await test('黑部滑桿會蔽掉更暗的像素', () => {
+    const b = { b0: 100, b1: 100, w0: 255, w1: 255 };
+    assert(bandFactor(99, b) === 0, '比滑桿暗的要不見');
+    assert(bandFactor(100, b) === 1, '正好在滑桿上的還在');
+    assert(bandFactor(200, b) === 1, '亮的不受影響');
+  });
+  await test('白部滑桿會蔽掉更亮的像素', () => {
+    const b = { b0: 0, b1: 0, w0: 150, w1: 150 };
+    assert(bandFactor(150, b) === 1, '正好在滑桿上的還在');
+    assert(bandFactor(151, b) === 0, '比滑桿亮的要不見');
+    assert(bandFactor(255, fullBand()) === 1, '滑桿在底時純白仍在');
+    assert(bandFactor(0, fullBand()) === 1, '滑桿在底時純黑仍在');
+  });
+  await test('兩個把手分開時會淡出', () => {
+    const b = { b0: 50, b1: 150, w0: 255, w1: 255 };
+    assert(bandFactor(50, b) === 0, '起點是全透明');
+    near(bandFactor(100, b), 0.5, 0.01, '中間應是一半');
+    assert(bandFactor(150, b) === 1, '終點是完全不透明');
+    const w = { b0: 0, b1: 0, w0: 100, w1: 200 };
+    near(bandFactor(150, w), 0.5, 0.01, '亮部中間也是一半');
+  });
+  await test('重疊的把手等於硬邊', () => {
+    const b = { b0: 128, b1: 128, w0: 255, w1: 255 };
+    assert(bandFactor(127, b) === 0 && bandFactor(128, b) === 1, '應該是干淨的切斷');
+  });
+  await test('讀回來的把手會被排序與夾住', () => {
+    const b = normalizeBand({ b0: 200, b1: 10, w0: 999, w1: -5 });
+    assert(b.b0 <= b.b1 && b.b1 <= b.w0 && b.w0 <= b.w1, `應已排序：${JSON.stringify(b)}`);
+    assert(b.b0 === 0 && b.w1 === 255, `應夾在 0..255：${JSON.stringify(b)}`);
+    const r = normalizeBlendIf({ channel: 'x' as 'gray' });
+    assert(r.channel === 'gray', '認不得的色版回到灰階');
+    assert(blendIfIsDefault(normalizeBlendIf(undefined)), '沒資料時給預設');
+  });
+  await test('cloneBlendIf 是深拷貝', () => {
+    const a = defaultBlendIf();
+    const b = cloneBlendIf(a);
+    b.self.b0 = 42;
+    b.under.w1 = 7;
+    assert(a.self.b0 === 0 && a.under.w1 === 255, '原來那個不該被改到');
+  });
+  await test('混合範圍會描述自己', () => {
+    assert(describeBlendIf(defaultBlendIf()) === '', '預設時不用說什麼');
+    const r = defaultBlendIf();
+    r.self.b0 = r.self.b1 = 60;
+    const text = describeBlendIf(r);
+    assert(text.includes('灰階') && text.includes('60'), `描述應包含色版與數值：${text}`);
+  });
+  await test('本圖層範圍會拿掉圖層自己的暗部', () => {
+    const body = createSurface(4, 1);
+    const img = body.ctx.createImageData(4, 1);
+    // black, dark grey, light grey, white — all opaque
+    const tones = [0, 60, 200, 255];
+    for (let i = 0; i < 4; i++) {
+      img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = tones[i];
+      img.data[i * 4 + 3] = 255;
+    }
+    body.ctx.putImageData(img, 0, 0);
+    const under = filled(4, 1, '#808080');
+    const r = defaultBlendIf();
+    r.self.b0 = r.self.b1 = 128;
+    applyBlendIf(body, under, r);
+    assert(pixel(body, 0, 0)[3] === 0, '黑的要不見');
+    assert(pixel(body, 1, 0)[3] === 0, '暗灰也要不見');
+    assert(pixel(body, 2, 0)[3] === 255, '亮灰要留著');
+    assert(pixel(body, 3, 0)[3] === 255, '白的要留著');
+  });
+  await test('下層範圍看的是底下的像素', () => {
+    const body = filled(2, 1, '#ff0000');
+    const under = createSurface(2, 1);
+    const img = under.ctx.createImageData(2, 1);
+    img.data[0] = img.data[1] = img.data[2] = 20;
+    img.data[3] = 255;
+    img.data[4] = img.data[5] = img.data[6] = 240;
+    img.data[7] = 255;
+    under.ctx.putImageData(img, 0, 0);
+    const r = defaultBlendIf();
+    r.under.b0 = r.under.b1 = 128;
+    applyBlendIf(body, under, r);
+    assert(pixel(body, 0, 0)[3] === 0, '壓在暗底上的要不見');
+    assert(pixel(body, 1, 0)[3] === 255, '壓在亮底上的要留著');
+  });
+  await test('透明的底不會把圖層當成黑底蔽掉', () => {
+    const body = filled(1, 1, '#ff0000');
+    const under = createSurface(1, 1);
+    const r = defaultBlendIf();
+    r.under.b0 = r.under.b1 = 128;
+    applyBlendIf(body, under, r);
+    assert(pixel(body, 0, 0)[3] === 255, '底是空的時應該放行');
+  });
+  await test('按色版比較而不是按亮度', () => {
+    // Pure blue is dark by luminance but full in the blue channel.
+    const blue = filled(1, 1, '#0000ff');
+    const under = filled(1, 1, '#808080');
+    const r = defaultBlendIf();
+    r.channel = 'b';
+    r.self.b0 = r.self.b1 = 128;
+    applyBlendIf(blue, under, r);
+    assert(pixel(blue, 0, 0)[3] === 255, '藍色版是滿的，應該留下');
+    const gray = filled(1, 1, '#0000ff');
+    const r2 = defaultBlendIf();
+    r2.self.b0 = r2.self.b1 = 128;
+    applyBlendIf(gray, under, r2);
+    assert(pixel(gray, 0, 0)[3] === 0, '灰階下純藍很暗，應該被蔽');
+  });
+  await test('預設範圍不會動到任何像素', () => {
+    const body = filled(3, 1, '#3080c0');
+    const before = [...body.ctx.getImageData(0, 0, 3, 1).data];
+    applyBlendIf(body, filled(3, 1, '#000000'), defaultBlendIf());
+    const after = [...body.ctx.getImageData(0, 0, 3, 1).data];
+    assert(before.join() === after.join(), '預設應該是空操作');
+  });
+  await test('混合範圍在合成時真的生效', () => {
+    const base = createRasterLayer('底', 2, 1, filled(2, 1, '#ffffff'));
+    const top = createRasterLayer('上', 2, 1, filled(2, 1, '#ff0000'));
+    top.blendIf.self.b0 = top.blendIf.self.b1 = 200;
+    // Red's luminance is about 54, so the whole layer should drop out.
+    const out = compositeLayers([base, top], { width: 2, height: 1 });
+    const px = pixel(out, 0, 0);
+    assert(px[0] === 255 && px[1] === 255, `上層應該消失，實得 ${px}`);
+  });
+  await test('填滿不透明度會讓像素變淡', () => {
+    const base = createRasterLayer('底', 2, 2, filled(2, 2, '#000000'));
+    const top = createRasterLayer('上', 2, 2, filled(2, 2, '#ffffff'));
+    top.fill = 0.5;
+    const out = compositeLayers([base, top], { width: 2, height: 2 });
+    near(pixel(out, 0, 0)[0], 128, 6, '填滿 50% 應該是一半');
+  });
+  await test('填滿歸零時覆蓋效果還在', () => {
+    const base = createRasterLayer('底', 6, 6, filled(6, 6, '#ffffff'));
+    const top = createRasterLayer('上', 6, 6, filled(6, 6, '#000000'));
+    top.fill = 0;
+    const plain = compositeLayers([base, top], { width: 6, height: 6 });
+    assert(pixel(plain, 3, 3)[0] === 255, '沒有效果時填滿 0 就是什麼都不剩');
+    top.effects.overlay.enabled = true;
+    top.effects.overlay.kind = 'color';
+    top.effects.overlay.color = { r: 0, g: 200, b: 0 };
+    const withOverlay = compositeLayers([base, top], { width: 6, height: 6 });
+    const px = pixel(withOverlay, 3, 3);
+    assert(px[1] > 150 && px[0] < 80, `覆蓋應該還看得到，實得 ${px}`);
+  });
+  await test('半透明的圖層不會因為覆蓋而變實', () => {
+    const base = createRasterLayer('底', 4, 4, filled(4, 4, '#ffffff'));
+    const top = createRasterLayer('上', 4, 4);
+    top.surface!.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    top.surface!.ctx.fillRect(0, 0, 4, 4);
+    top.effects.overlay.enabled = true;
+    top.effects.overlay.color = { r: 0, g: 0, b: 0 };
+    const out = compositeLayers([base, top], { width: 4, height: 4 });
+    near(pixel(out, 2, 2)[0], 128, 10, '半透明加上覆蓋還是半透明');
+  });
+  await test('群組的填滿當作第二個不透明度', () => {
+    const inner = createRasterLayer('內', 2, 2, filled(2, 2, '#000000'));
+    const group = createGroupLayer('群組');
+    group.children = [inner];
+    const base = createRasterLayer('底', 2, 2, filled(2, 2, '#ffffff'));
+    group.fill = 0.5;
+    const out = compositeLayers([base, group], { width: 2, height: 2 });
+    near(pixel(out, 0, 0)[0], 128, 6, '群組填滿 50%');
+  });
+  await test('舊專案檔沒有進階混合也能載入', async () => {
+    const doc = PhotoDoc.createBlank('old', 8, 8, 'white');
+    const json = await serializeDocument(doc);
+    const data = JSON.parse(json) as { layers: Record<string, unknown>[] };
+    for (const l of data.layers) { delete l.fill; delete l.blendIf; }
+    const back = await loadProject(JSON.stringify(data));
+    assert(back.layers[0].fill === 1, '沒寫填滿就當成滿的');
+    assert(blendIfIsDefault(back.layers[0].blendIf), '沒寫範圍就當成預設');
+  });
+  await test('進階混合會隨專案檔走', async () => {
+    const doc = PhotoDoc.createBlank('adv', 8, 8, 'white');
+    doc.layers[0].fill = 0.42;
+    doc.layers[0].blendIf.channel = 'g';
+    doc.layers[0].blendIf.self.b0 = 30;
+    doc.layers[0].blendIf.self.b1 = 90;
+    const back = await loadProject(await serializeDocument(doc));
+    near(back.layers[0].fill, 0.42, 0.001, '填滿應一致');
+    assert(back.layers[0].blendIf.channel === 'g', '色版應一致');
+    assert(back.layers[0].blendIf.self.b1 === 90, '把手應一致');
+  });
+  await test('複製圖層不共用混合範圍', () => {
+    const l = createRasterLayer('a', 4, 4);
+    const copy = duplicateLayer(l);
+    copy.blendIf.self.b0 = 99;
+    copy.fill = 0.1;
+    assert(l.blendIf.self.b0 === 0, '原圖層的範圍不該被改');
+    assert(l.fill === 1, '原圖層的填滿不該被改');
+  });
+  await test('圖層構成會記下並還原進階混合', () => {
+    const l = createRasterLayer('a', 4, 4);
+    l.fill = 0.25;
+    l.blendIf.self.w0 = 100;
+    l.blendIf.self.w1 = 180;
+    const comp = captureComp([l], '測試');
+    l.fill = 1;
+    l.blendIf = defaultBlendIf();
+    applyComp([l], comp);
+    near(l.fill, 0.25, 0.001, '填滿應被還原');
+    assert(l.blendIf.self.w0 === 100 && l.blendIf.self.w1 === 180, '範圍應被還原');
+    const clone = cloneComp(comp);
+    clone.layers[0].blendIf.self.w0 = 5;
+    assert(comp.layers[0].blendIf.self.w0 === 100, '複製的構成不該共用範圍');
   });
 
   // ---- tools smoke test ----

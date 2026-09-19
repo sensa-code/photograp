@@ -1,4 +1,5 @@
 import type { AdjustmentSpec, Layer, LayerEffects, TextStyle } from './types';
+import { cloneBlendIf, defaultBlendIf } from './blend-range';
 import { cloneSurface, createSurface, type Surface } from './surface';
 import { uid } from './ids';
 import { clonePath } from './path';
@@ -40,6 +41,8 @@ function base(name: string): Omit<Layer, 'kind' | 'surface'> {
     visible: true,
     locked: false,
     opacity: 1,
+    fill: 1,
+    blendIf: defaultBlendIf(),
     blend: 'normal',
     x: 0,
     y: 0,
@@ -71,6 +74,7 @@ export function createGroupLayer(name: string): Layer {
 export function shallowCopyLayer(l: Layer): Layer {
   return {
     ...l,
+    blendIf: cloneBlendIf(l.blendIf),
     effects: {
       dropShadow: { ...l.effects.dropShadow, color: { ...l.effects.dropShadow.color } },
       stroke: { ...l.effects.stroke, color: { ...l.effects.stroke.color } },
