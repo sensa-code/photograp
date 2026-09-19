@@ -232,7 +232,8 @@ interface Tool {
 
 版本 2 起另外包含 `paths`、`activePathId` 與 `channels`，
 智慧型物件圖層會多存一個 `smart` 區塊（內嵌原始來源的 PNG 與放置資料、濾鏡堆疊）；
-載入後會重新渲染快取。格式演進時請提高 `version`
+版本 3 再加上 `quickMask`，所以存檔時停在快速遮色片模式也不會遺失。
+載入後會重新渲染智慧型物件的快取。格式演進時請提高 `version`
 並在 `io/files.ts` 的 `loadProject()` 內做向下相容處理。
 
 ## 測試
