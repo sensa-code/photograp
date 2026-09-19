@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Photograp 測試</title>
+    <style>
+      body {
+        background: #1e1e1e;
+        color: #dcdcdc;
+        font: 13px/1.6 "Segoe UI", "Noto Sans TC", system-ui, sans-serif;
+        margin: 0;
+        padding: 24px;
+      }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      #summary { margin: 12px 0 18px; font-size: 15px; font-weight: 600; }
+      .ok { color: #6ddf9c; }
+      .fail { color: #ff7a7a; }
+      .group { margin: 16px 0 6px; color: #8fb8ff; font-weight: 700; }
+      .case { padding: 2px 0 2px 18px; }
+      .case .why { color: #ffb3b3; display: block; padding-left: 16px; }
+      code { color: #d7c4ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Photograp 自動測試</h1>
+    <div class="hint">在瀏覽器中執行核心影像運算的驗證。</div>
+    <div id="summary">執行中…</div>
+    <div id="out"></div>
+    <script type="module" src="/tests/suite.ts"></script>
+  </body>
+</html>

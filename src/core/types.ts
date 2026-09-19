@@ -1,0 +1,134 @@
+import type { Surface } from './surface';
+import type { RGB } from './color';
+
+export const BLEND_MODES = [
+  'normal', 'dissolve',
+  'darken', 'multiply', 'color-burn', 'linear-burn',
+  'lighten', 'screen', 'color-dodge', 'linear-dodge',
+  'overlay', 'soft-light', 'hard-light', 'vivid-light', 'linear-light', 'pin-light', 'hard-mix',
+  'difference', 'exclusion', 'subtract', 'divide',
+  'hue', 'saturation', 'color', 'luminosity',
+] as const;
+export type BlendMode = (typeof BLEND_MODES)[number];
+
+/** Blend modes the 2D context implements natively; the rest run per-pixel. */
+export const NATIVE_BLEND: Partial<Record<BlendMode, GlobalCompositeOperation>> = {
+  normal: 'source-over',
+  darken: 'darken',
+  multiply: 'multiply',
+  'color-burn': 'color-burn',
+  lighten: 'lighten',
+  screen: 'screen',
+  'color-dodge': 'color-dodge',
+  'linear-dodge': 'lighter',
+  overlay: 'overlay',
+  'soft-light': 'soft-light',
+  'hard-light': 'hard-light',
+  difference: 'difference',
+  exclusion: 'exclusion',
+  hue: 'hue',
+  saturation: 'saturation',
+  color: 'color',
+  luminosity: 'luminosity',
+};
+
+export type CurveChannel = 'rgb' | 'r' | 'g' | 'b';
+
+export interface CurvesParams {
+  type: 'curves';
+  /** Control points per channel, each [input, output] in 0..255, sorted by input. */
+  curves: Record<CurveChannel, [number, number][]>;
+}
+
+export type AdjustmentSpec =
+  | { type: 'brightness-contrast'; brightness: number; contrast: number; legacy: boolean }
+  | {
+      type: 'levels'; channel: CurveChannel;
+      inBlack: number; inWhite: number; gamma: number;
+      outBlack: number; outWhite: number;
+    }
+  | CurvesParams
+  | { type: 'hue-saturation'; hue: number; saturation: number; lightness: number; colorize: boolean }
+  | {
+      type: 'color-balance';
+      shadows: [number, number, number];
+      midtones: [number, number, number];
+      highlights: [number, number, number];
+      preserveLuminosity: boolean;
+    }
+  | { type: 'exposure'; exposure: number; offset: number; gamma: number }
+  | { type: 'vibrance'; vibrance: number; saturation: number }
+  | {
+      type: 'black-white';
+      reds: number; yellows: number; greens: number;
+      cyans: number; blues: number; magentas: number;
+      tint: boolean; tintColor: RGB;
+    }
+  | { type: 'invert' }
+  | { type: 'threshold'; level: number }
+  | { type: 'posterize'; levels: number }
+  | { type: 'photo-filter'; color: RGB; density: number; preserveLuminosity: boolean }
+  | { type: 'gradient-map'; stops: GradientStop[] }
+  | { type: 'channel-mixer'; matrix: number[]; monochrome: boolean };
+
+export type AdjustmentType = AdjustmentSpec['type'];
+
+export interface GradientStop { pos: number; color: RGB; alpha: number }
+
+export interface TextStyle {
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  color: RGB;
+  align: 'left' | 'center' | 'right';
+  lineHeight: number;
+  letterSpacing: number;
+  strokeWidth: number;
+  strokeColor: RGB;
+}
+
+export type LayerKind = 'raster' | 'text' | 'adjustment' | 'group';
+
+export interface LayerEffects {
+  dropShadow: { enabled: boolean; color: RGB; alpha: number; blur: number; dx: number; dy: number };
+  stroke: { enabled: boolean; color: RGB; alpha: number; width: number };
+  glow: { enabled: boolean; color: RGB; alpha: number; blur: number };
+}
+
+export interface Layer {
+  id: string;
+  name: string;
+  kind: LayerKind;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;          // 0..1
+  blend: BlendMode;
+  /** Offset of the layer surface within the document. */
+  x: number;
+  y: number;
+  /** Pixel data. null for adjustment/group layers. */
+  surface: Surface | null;
+  /** Grayscale mask surface (white = visible). null when no mask. */
+  mask: Surface | null;
+  maskEnabled: boolean;
+  maskLinked: boolean;
+  /** Clip to the composite of the layers below within the same clipping group. */
+  clipped: boolean;
+  text?: TextStyle;
+  adjustment?: AdjustmentSpec;
+  /** Group layers own children (top of array renders last, i.e. on top). */
+  children?: Layer[];
+  expanded?: boolean;
+  effects: LayerEffects;
+}
+
+export interface DocumentMeta {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  /** Pixels per inch, used by print-size readouts only. */
+  dpi: number;
+}
