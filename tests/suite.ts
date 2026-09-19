@@ -32,6 +32,10 @@ import { createSmartObject, renderSmartLayer, smartBounds, smartFilterEntry } fr
 import { quickMaskCoverage, renderQuickMaskOverlay } from '../src/core/quickmask';
 import { WarpMesh, warpImage, composeWarpWithSelection } from '../src/filters/liquify';
 import {
+  dilateMask, findHealSource, maskBounds, seamlessClone, spotHeal,
+} from '../src/filters/heal';
+import { applyFillRegion, contentAwareFill } from '../src/filters/inpaint';
+import {
   collectSnapTargets, createGuide, defaultSnapSettings, guideAt, layerBounds,
   snapGroup, snapPoint, snapRect, snapScalar,
 } from '../src/core/guides';
@@ -1142,6 +1146,216 @@ async function run(): Promise<void> {
     assert(restored.guides.length === 2, '專案檔應保留參考線');
     assert(restored.guides[0].axis === 'v' && restored.guides[0].pos === 12, '參考線內容應一致');
     assert(restored.guidesLocked === true, '鎖定狀態應被保留');
+  });
+
+  // ---- healing ----
+  group('修復');
+  await test('遮色片邊界與擴張', () => {
+    const m = new Uint8Array(10 * 10);
+    m[3 * 10 + 4] = 255;
+    m[5 * 10 + 6] = 255;
+    const b = maskBounds(m, 10, 10)!;
+    assert(b.x === 4 && b.y === 3 && b.w === 3 && b.h === 3, `邊界不正確：${JSON.stringify(b)}`);
+    const grown = dilateMask(m, 10, 10, 1);
+    assert(grown[3 * 10 + 3] === 255 && grown[2 * 10 + 4] === 255, '擴張後應涵蓋鄰居');
+    assert(maskBounds(new Uint8Array(4), 2, 2) === null, '空遮色片應回傳 null');
+  });
+  await test('無縫貼合會吸收亮度落差', () => {
+    const dst = new ImageData(40, 40);
+    for (let i = 0; i < dst.data.length; i += 4) {
+      dst.data[i] = 100; dst.data[i + 1] = 100; dst.data[i + 2] = 100; dst.data[i + 3] = 255;
+    }
+    const src = new ImageData(40, 40);
+    for (let i = 0; i < src.data.length; i += 4) {
+      src.data[i] = 200; src.data[i + 1] = 200; src.data[i + 2] = 200; src.data[i + 3] = 255;
+    }
+    const mask = new Uint8Array(40 * 40);
+    for (let y = 12; y < 28; y++) for (let x = 12; x < 28; x++) mask[y * 40 + x] = 255;
+
+    seamlessClone(dst, src, mask, 200);
+    const centre = dst.data[(20 * 40 + 20) * 4];
+    near(centre, 100, 4, '平坦來源貼上後應完全接上目標亮度');
+  });
+  await test('無縫貼合會保留來源的紋理', () => {
+    const size = 40;
+    const dst = new ImageData(size, size);
+    const src = new ImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        dst.data[i] = dst.data[i + 1] = dst.data[i + 2] = 80;
+        dst.data[i + 3] = 255;
+        // Source carries a vertical ramp on top of a much brighter base.
+        const v = 180 + (x % 8) * 6;
+        src.data[i] = src.data[i + 1] = src.data[i + 2] = v;
+        src.data[i + 3] = 255;
+      }
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 12; y < 28; y++) for (let x = 12; x < 28; x++) mask[y * size + x] = 255;
+    seamlessClone(dst, src, mask, 250);
+
+    const a = dst.data[(20 * size + 16) * 4];
+    const b = dst.data[(20 * size + 19) * 4];
+    assert(Math.abs(a - b) > 8, `來源紋理應被保留：${a} vs ${b}`);
+    near((a + b) / 2, 80, 25, '整體亮度應被拉回目標的水準');
+  });
+  await test('自動取樣會找到相似的周圍', () => {
+    const size = 64;
+    const img = new ImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        // Left half dark, right half light; a spot sits in the dark half.
+        const v = x < 32 ? 60 : 200;
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+        img.data[i + 3] = 255;
+      }
+    }
+    for (let y = 28; y < 36; y++) {
+      for (let x = 12; x < 20; x++) {
+        const i = (y * size + x) * 4;
+        img.data[i] = 255; img.data[i + 1] = 40; img.data[i + 2] = 40;
+      }
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 28; y < 36; y++) for (let x = 12; x < 20; x++) mask[y * size + x] = 255;
+
+    const src = findHealSource(img, mask, 24)!;
+    assert(src !== null, '應找得到取樣來源');
+    assert(12 + src.dx >= 0 && 12 + src.dx < 32, `來源應留在暗的一側，dx=${src.dx}`);
+  });
+  await test('汙點修復會移除斑點', () => {
+    const size = 64;
+    const img = new ImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        const v = 120 + ((x + y) % 5) * 4;
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+        img.data[i + 3] = 255;
+      }
+    }
+    for (let y = 28; y < 36; y++) {
+      for (let x = 28; x < 36; x++) {
+        const i = (y * size + x) * 4;
+        img.data[i] = 255; img.data[i + 1] = 30; img.data[i + 2] = 30;
+      }
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 27; y < 37; y++) for (let x = 27; x < 37; x++) mask[y * size + x] = 255;
+
+    assert(spotHeal(img, mask, 40), '應完成修復');
+    const p = (32 * size + 32) * 4;
+    assert(Math.abs(img.data[p] - img.data[p + 1]) < 25, `修復後不應殘留紅色：${[...img.data.slice(p, p + 3)]}`);
+    near(img.data[p], 128, 30, '亮度應回到周圍的水準');
+  });
+  await test('大面積修復也要接上周圍（多重網格）', () => {
+    // Plain relaxation leaves the middle of a wide region at its initial
+    // value, which would reproduce the blemish instead of removing it.
+    const size = 320;
+    const img = new ImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        const v = 110 + ((x + y) % 7) * 3;
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+        img.data[i + 3] = 255;
+      }
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 130; y < 190; y++) {
+      for (let x = 130; x < 190; x++) {
+        mask[y * size + x] = 255;
+        const i = (y * size + x) * 4;
+        img.data[i] = 250; img.data[i + 1] = 20; img.data[i + 2] = 20;
+      }
+    }
+    assert(spotHeal(img, mask, 120), '應完成修復');
+    const p = (160 * size + 160) * 4;
+    const [r, g, b] = [img.data[p], img.data[p + 1], img.data[p + 2]];
+    assert(Math.abs(r - g) < 25 && Math.abs(g - b) < 25, `區域中心不應殘留紅色：${[r, g, b]}`);
+    near(r, 120, 35, '中心亮度應接上周圍');
+  });
+  await test('沒有可用來源時回報失敗', () => {
+    const img = new ImageData(8, 8);
+    const mask = new Uint8Array(64).fill(255);
+    assert(spotHeal(img, mask, 20) === false, '整張都是遮色片時應失敗');
+  });
+
+  // ---- content-aware fill ----
+  group('內容感知填色');
+  await test('純色區域會補成同一個顏色', () => {
+    const size = 48;
+    const img = new ImageData(size, size);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = 120; img.data[i + 1] = 80; img.data[i + 2] = 200; img.data[i + 3] = 255;
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 18; y < 30; y++) {
+      for (let x = 18; x < 30; x++) {
+        mask[y * size + x] = 255;
+        const i = (y * size + x) * 4;
+        img.data[i] = 0; img.data[i + 1] = 255; img.data[i + 2] = 0;
+      }
+    }
+    const region = contentAwareFill(img, mask, { patchSize: 5, maxWorkingSize: 128, iterations: 3 })!;
+    assert(region !== null, '應產生填色結果');
+    applyFillRegion(img, region, mask);
+    const p = (24 * size + 24) * 4;
+    near(img.data[p], 120, 12, 'R 應回到背景色');
+    near(img.data[p + 1], 80, 12, 'G 應回到背景色');
+    near(img.data[p + 2], 200, 12, 'B 應回到背景色');
+  });
+  await test('條紋紋理會被延續進破洞', () => {
+    const size = 64;
+    const stripe = (y: number): number => ((y >> 2) % 2 === 0 ? 40 : 210);
+    const img = new ImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        const v = stripe(y);
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+        img.data[i + 3] = 255;
+      }
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 24; y < 40; y++) {
+      for (let x = 24; x < 40; x++) {
+        mask[y * size + x] = 255;
+        const i = (y * size + x) * 4;
+        img.data[i] = 255; img.data[i + 1] = 0; img.data[i + 2] = 0;
+      }
+    }
+
+    const region = contentAwareFill(img, mask, { patchSize: 7, maxWorkingSize: 160, iterations: 4 })!;
+    applyFillRegion(img, region, mask);
+
+    let worst = 0;
+    for (let y = 26; y < 38; y++) {
+      for (let x = 26; x < 38; x++) {
+        const i = (y * size + x) * 4;
+        worst = Math.max(worst, Math.abs(img.data[i] - stripe(y)));
+      }
+    }
+    assert(worst < 45, `填色應延續條紋，最大誤差 ${worst}`);
+  });
+  await test('沒有遮色片時不做任何事', () => {
+    const img = new ImageData(16, 16);
+    assert(contentAwareFill(img, new Uint8Array(256), {}) === null, '空遮色片應回傳 null');
+    assert(contentAwareFill(img, new Uint8Array(256).fill(255), {}) === null, '整張都是洞應回傳 null');
+  });
+  await test('只處理破洞周圍的視窗', () => {
+    const size = 200;
+    const img = new ImageData(size, size);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = 90; img.data[i + 1] = 90; img.data[i + 2] = 90; img.data[i + 3] = 255;
+    }
+    const mask = new Uint8Array(size * size);
+    for (let y = 96; y < 104; y++) for (let x = 96; x < 104; x++) mask[y * size + x] = 255;
+    const region = contentAwareFill(img, mask, { patchSize: 5, maxWorkingSize: 128, iterations: 2 })!;
+    assert(region.rect.w < size && region.rect.h < size, '工作視窗應小於整張影像');
+    assert(region.rect.x <= 96 && region.rect.y <= 96, '視窗應涵蓋破洞');
   });
 
   // ---- tools smoke test ----

@@ -5,6 +5,7 @@ import { MoveTool, HandTool, ZoomTool, EyedropperTool, CropTool } from './nav';
 import { BucketTool, GradientTool, ShapeTool, TextTool } from './draw';
 import { TransformTool } from './transform';
 import { PenTool, DirectSelectTool } from './pen';
+import { SpotHealingBrushTool, HealingBrushTool } from './heal';
 
 export const transformTool = new TransformTool();
 export const cropTool = new CropTool();
@@ -20,6 +21,8 @@ export const TOOLS: Tool[] = [
   new BrushTool(),
   new PencilTool(),
   new EraserTool(),
+  new SpotHealingBrushTool(),
+  new HealingBrushTool(),
   new CloneStampTool(),
   new SmudgeTool(),
   new BlurSharpenTool(),
@@ -42,6 +45,7 @@ export const TOOL_SLOTS: string[][] = [
   ['crop'],
   ['eyedropper'],
   ['brush', 'pencil', 'eraser'],
+  ['spot-heal', 'heal'],
   ['clone', 'smudge', 'blur-sharpen', 'dodge-burn'],
   ['bucket', 'gradient'],
   ['pen', 'direct-select'],

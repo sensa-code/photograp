@@ -57,6 +57,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       cmdEntry('edit.clear'),
       sep,
       cmdEntry('edit.fill'),
+      cmdEntry('edit.contentAwareFill'),
       cmdEntry('edit.fillFg'),
       cmdEntry('edit.fillBg'),
       cmdEntry('edit.stroke'),

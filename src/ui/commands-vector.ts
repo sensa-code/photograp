@@ -8,6 +8,8 @@ import { pathFromLoops, toPath2D, createPath, pathIsEmpty, anchorCount } from '.
 import { channelCoverage, createAlphaChannel } from '../core/channels';
 import { quickMaskCoverage } from '../core/quickmask';
 import { createGuide, type GuideAxis } from '../core/guides';
+import { applyFillRegion, contentAwareFill } from '../filters/inpaint';
+import { dilateMask } from '../filters/heal';
 import { createSmartObject, renderSmartLayer, replaceSmartSource, smartFilterEntry } from '../core/smart';
 import { rgbCss } from '../core/color';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
@@ -338,6 +340,69 @@ async function quickMaskOptionsDialog(app: App): Promise<void> {
   app.changed();
 }
 
+/**
+ * Content-aware fill: rebuild the selection from the surrounding image.
+ * The work is synchronous, so the toast is flushed first and the fill runs
+ * on the next frame; otherwise the UI would freeze with no explanation.
+ */
+async function contentAwareFillDialog(app: App): Promise<void> {
+  const d = doc(app);
+  const target = d?.paintTarget();
+  if (!d || !target) { app.toast('請先選擇可編輯的圖層', 'error'); return; }
+  if (!d.selection.active) { app.toast('請先建立選取範圍', 'error'); return; }
+
+  let quality = '480';
+  let detail = 7;
+  let expand = 2;
+  const body = formGrid([
+    [null, el('div', {
+      class: 'hint',
+      text: '選取範圍會以周圍的影像重新合成。選取時多框一點邊緣，結果通常更自然。',
+    })],
+    ['品質', selectControl(quality, [
+      { value: '320', label: '快速（較小取樣）' },
+      { value: '480', label: '標準' },
+      { value: '720', label: '精細（較慢）' },
+    ], (v) => { quality = v; })],
+    ['結構細節', sliderControl(detail, 3, 15, 2, (v) => { detail = v; }, ' px', 150)],
+    ['擴張選取範圍', sliderControl(expand, 0, 12, 1, (v) => { expand = v; }, ' px', 150)],
+  ]);
+  if (await openModal({ title: '內容感知填色', body }) !== 'ok') return;
+
+  app.status('內容感知填色運算中…');
+  app.toast('內容感知填色運算中…');
+  // A plain timeout, not requestAnimationFrame: rAF never fires while the
+  // tab is hidden, which would leave the fill waiting forever.
+  await new Promise((r) => setTimeout(r, 32));
+
+  const w = target.surface.w, h = target.surface.h;
+  let mask: Uint8Array = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      mask[y * w + x] = d.selection.at(x + target.offX, y + target.offY);
+    }
+  }
+  if (expand > 0) mask = dilateMask(mask, w, h, expand);
+
+  const img = target.surface.ctx.getImageData(0, 0, w, h);
+  const started = performance.now();
+  const region = contentAwareFill(img, mask, {
+    patchSize: detail,
+    maxWorkingSize: Number(quality),
+    iterations: quality === '720' ? 5 : 4,
+  });
+  if (!region) {
+    app.toast('選取範圍太大或周圍沒有可取樣的內容', 'error');
+    return;
+  }
+  applyFillRegion(img, region, mask);
+  const dest = d.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.putImageData(img, 0, 0);
+  d.commit('內容感知填色');
+  app.toast(`內容感知填色完成（${Math.round(performance.now() - started)} ms）`, 'success');
+  app.changed();
+}
+
 async function newGuideDialog(app: App): Promise<void> {
   const d = doc(app);
   if (!d) return;
@@ -389,6 +454,12 @@ const snapToggle = (
 }, { checked: (a) => a.snap[key] });
 
 export const VECTOR_COMMANDS: Cmd[] = [
+  // ---- retouching ----
+  cmd('edit.contentAwareFill', '內容感知填色…', (a) => contentAwareFillDialog(a), {
+    shortcut: 'Shift+Backspace',
+    enabled: (a) => hasSelection(a) && !!doc(a)?.paintTarget(),
+  }),
+
   // ---- guides and snapping ----
   cmd('view.guides', '顯示參考線', (a) => {
     const v = a.view();
