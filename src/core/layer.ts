@@ -11,6 +11,15 @@ export function defaultEffects(): LayerEffects {
     dropShadow: { enabled: false, color: { r: 0, g: 0, b: 0 }, alpha: 0.6, blur: 8, dx: 4, dy: 4 },
     stroke: { enabled: false, color: { r: 0, g: 0, b: 0 }, alpha: 1, width: 2 },
     glow: { enabled: false, color: { r: 255, g: 235, b: 140 }, alpha: 0.7, blur: 12 },
+    innerShadow: {
+      enabled: false, color: { r: 0, g: 0, b: 0 }, alpha: 0.55, blur: 10, dx: 3, dy: 3,
+    },
+    innerGlow: { enabled: false, color: { r: 255, g: 246, b: 200 }, alpha: 0.7, blur: 12 },
+    bevel: {
+      enabled: false, size: 8, depth: 100, angle: 120,
+      highlight: { r: 255, g: 255, b: 255 }, shadow: { r: 0, g: 0, b: 0 },
+      alpha: 0.75, emboss: false,
+    },
     overlay: {
       enabled: false, kind: 'color', alpha: 1, color: { r: 220, g: 60, b: 60 },
       stops: [
@@ -66,6 +75,15 @@ export function shallowCopyLayer(l: Layer): Layer {
       dropShadow: { ...l.effects.dropShadow, color: { ...l.effects.dropShadow.color } },
       stroke: { ...l.effects.stroke, color: { ...l.effects.stroke.color } },
       glow: { ...l.effects.glow, color: { ...l.effects.glow.color } },
+      innerShadow: {
+        ...l.effects.innerShadow, color: { ...l.effects.innerShadow.color },
+      },
+      innerGlow: { ...l.effects.innerGlow, color: { ...l.effects.innerGlow.color } },
+      bevel: {
+        ...l.effects.bevel,
+        highlight: { ...l.effects.bevel.highlight },
+        shadow: { ...l.effects.bevel.shadow },
+      },
       overlay: {
         ...l.effects.overlay,
         color: { ...l.effects.overlay.color },

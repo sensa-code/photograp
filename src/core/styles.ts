@@ -43,6 +43,21 @@ export const BUILTIN_STYLES: StylePreset[] = [
     );
     e.overlay.angle = 90;
   }),
+  preset('embossed', '浮雕金屬', (e) => {
+    e.bevel = {
+      enabled: true, size: 10, depth: 160, angle: 120,
+      highlight: { r: 255, g: 255, b: 255 }, shadow: { r: 20, g: 24, b: 30 },
+      alpha: 0.85, emboss: false,
+    };
+    e.innerShadow = {
+      enabled: true, color: { r: 0, g: 0, b: 0 }, alpha: 0.35, blur: 12, dx: 0, dy: 3,
+    };
+  }),
+  preset('inner-glow', '內側光暈', (e) => {
+    e.innerGlow = {
+      enabled: true, color: { r: 255, g: 220, b: 120 }, alpha: 0.85, blur: 20,
+    };
+  }),
   preset('brick-fill', '磚牆圖樣', (e) => {
     e.overlay.enabled = true;
     e.overlay.kind = 'pattern';
@@ -108,6 +123,9 @@ export function describeStyle(e: LayerEffects): string {
   if (e.dropShadow.enabled) bits.push('陰影');
   if (e.glow.enabled) bits.push('外光暈');
   if (e.stroke.enabled) bits.push('筆畫');
+  if (e.innerShadow.enabled) bits.push('內陰影');
+  if (e.innerGlow.enabled) bits.push('內光暈');
+  if (e.bevel.enabled) bits.push(e.bevel.emboss ? '浮雕' : '斜角');
   if (e.overlay.enabled) {
     bits.push({ color: '顏色覆蓋', gradient: '漸層覆蓋', pattern: '圖樣覆蓋' }[e.overlay.kind]);
   }

@@ -1976,12 +1976,143 @@ async function run(): Promise<void> {
     assert(cachedPatternSurface(embeddedPattern(overlay)!), 'warmEmbedded 後應已在快取中');
   });
 
+  group('內側效果與斜角');
+  /** A solid square in the middle, so inside and outside are easy to tell. */
+  const block = (size = 60, box = 30): ReturnType<typeof createRasterLayer> => {
+    const l = createRasterLayer('方塊', size, size);
+    const at = (size - box) / 2;
+    l.surface!.ctx.fillStyle = '#808080';
+    l.surface!.ctx.fillRect(at, at, box, box);
+    return l;
+  };
+
+  await test('內陰影只落在形狀內', () => {
+    const l = block();
+    l.effects.innerShadow = {
+      enabled: true, color: { r: 0, g: 0, b: 0 }, alpha: 1, blur: 6, dx: 4, dy: 4,
+    };
+    const out = compositeLayers([l], { width: 60, height: 60 });
+    // Just inside the top-left edge, where a shadow offset down-right lands.
+    const inside = pixel(out, 17, 17);
+    const middle = pixel(out, 30, 30);
+    assert(inside[0] < 110, `內側邊緣應變暗，實得 ${inside}`);
+    assert(middle[0] > 115, `中心應幾乎不變，實得 ${middle}`);
+    assert(pixel(out, 5, 5)[3] === 0, '形狀外應仍然透明');
+  });
+  await test('內陰影不會讓圖層變大', () => {
+    const l = block();
+    const before = opaqueBounds(compositeLayers([l], { width: 60, height: 60 }))!;
+    l.effects.innerShadow = {
+      enabled: true, color: { r: 0, g: 0, b: 0 }, alpha: 1, blur: 20, dx: 10, dy: 10,
+    };
+    const after = opaqueBounds(compositeLayers([l], { width: 60, height: 60 }))!;
+    assert(after.w === before.w && after.h === before.h, '外接矩形應一樣');
+  });
+  await test('內光暈從邊緣往內亮', () => {
+    const l = block();
+    l.effects.innerGlow = {
+      enabled: true, color: { r: 255, g: 255, b: 255 }, alpha: 1, blur: 10,
+    };
+    const out = compositeLayers([l], { width: 60, height: 60 });
+    const edge = pixel(out, 16, 30);
+    const middle = pixel(out, 30, 30);
+    assert(edge[0] > middle[0] + 20, `邊緣應比中心亮，實得 ${edge} vs ${middle}`);
+    assert(pixel(out, 3, 3)[3] === 0, '形狀外應仍然透明');
+  });
+  await test('斜角依光源方向分出亮暗', () => {
+    const l = block();
+    l.effects.bevel = {
+      enabled: true, size: 6, depth: 200, angle: 90,
+      highlight: { r: 255, g: 255, b: 255 }, shadow: { r: 0, g: 0, b: 0 },
+      alpha: 1, emboss: false,
+    };
+    const out = compositeLayers([l], { width: 60, height: 60 });
+    // Light from straight above: the top edge catches it, the bottom is shaded.
+    const top = pixel(out, 30, 17);
+    const bottom = pixel(out, 30, 42);
+    assert(top[0] > bottom[0] + 30, `上邊應比下邊亮，實得 ${top} vs ${bottom}`);
+    assert(pixel(out, 3, 3)[3] === 0, '一般斜角不應溢出形狀');
+  });
+  await test('反轉角度會對調亮暗', () => {
+    const mk = (angle: number): number[] => {
+      const l = block();
+      l.effects.bevel = {
+        enabled: true, size: 6, depth: 200, angle,
+        highlight: { r: 255, g: 255, b: 255 }, shadow: { r: 0, g: 0, b: 0 },
+        alpha: 1, emboss: false,
+      };
+      return pixel(compositeLayers([l], { width: 60, height: 60 }), 30, 17);
+    };
+    const up = mk(90)[0];
+    const down = mk(-90)[0];
+    assert(up > down + 30, `光源轉 180° 後上邊應變暗，實得 ${up} vs ${down}`);
+  });
+  await test('浮雕會延伸到形狀外', () => {
+    const l = block();
+    l.effects.bevel = {
+      enabled: true, size: 8, depth: 200, angle: 90,
+      highlight: { r: 255, g: 255, b: 255 }, shadow: { r: 0, g: 0, b: 0 },
+      alpha: 1, emboss: true,
+    };
+    const out = compositeLayers([l], { width: 60, height: 60 });
+    const bounds = opaqueBounds(out)!;
+    assert(bounds.w > 30, `浮雕應超出原本的 30px，實得 ${bounds.w}`);
+  });
+  await test('深度歸零時斜角不改變畫面', () => {
+    const plain = compositeLayers([block()], { width: 60, height: 60 });
+    const l = block();
+    l.effects.bevel = {
+      enabled: true, size: 6, depth: 0, angle: 90,
+      highlight: { r: 255, g: 255, b: 255 }, shadow: { r: 0, g: 0, b: 0 },
+      alpha: 1, emboss: false,
+    };
+    const out = compositeLayers([l], { width: 60, height: 60 });
+    assert(pixel(out, 30, 17).join() === pixel(plain, 30, 17).join(), '深度 0 應完全不動');
+  });
+  await test('內側效果都默認關閉且複製時不共用', () => {
+    const e = defaultEffects();
+    assert(!e.innerShadow.enabled && !e.innerGlow.enabled && !e.bevel.enabled, '預設應全關');
+    const l = block();
+    const copy = duplicateLayer(l);
+    copy.effects.innerShadow.color.r = 200;
+    copy.effects.bevel.highlight.g = 10;
+    assert(l.effects.innerShadow.color.r === 0, '不應改到原圖層');
+    assert(l.effects.bevel.highlight.g === 255, '不應改到原圖層');
+  });
+  await test('舊專案檔沒有新效果也能載入', async () => {
+    const doc = PhotoDoc.createBlank('old-effects', 20, 20, 'white');
+    const json = JSON.parse(serializeDocument(doc)) as {
+      layers: { effects: Record<string, unknown> }[];
+    };
+    for (const l of json.layers) {
+      delete l.effects.innerShadow;
+      delete l.effects.innerGlow;
+      delete l.effects.bevel;
+    }
+    const back = await loadProject(JSON.stringify(json));
+    const e = back.layers[0].effects;
+    assert(e.innerShadow && e.innerGlow && e.bevel, '缺的效果應補上預設');
+    assert(!e.bevel.enabled, '補上的應是關閉的');
+    assert(back.render().w === 20, '載入後應能正常合成');
+  });
+  await test('樣式描述會列出新效果', () => {
+    const e = defaultEffects();
+    e.innerGlow.enabled = true;
+    e.bevel.enabled = true;
+    const text = describeStyle(e);
+    assert(text.includes('內光暈') && text.includes('斜角'), `描述不完整：${text}`);
+    e.bevel.emboss = true;
+    assert(describeStyle(e).includes('浮雕'), '浮雕應有自己的名字');
+  });
+
   group('圖層樣式預設');
   await test('內建樣式都至少啟用一種效果', () => {
     assert(BUILTIN_STYLES.length >= 6, '內建樣式數量');
     for (const s2 of BUILTIN_STYLES) {
       const e = s2.effects;
-      const any = e.dropShadow.enabled || e.glow.enabled || e.stroke.enabled || e.overlay.enabled;
+      const any = e.dropShadow.enabled || e.glow.enabled || e.stroke.enabled
+        || e.overlay.enabled || e.innerShadow.enabled || e.innerGlow.enabled
+        || e.bevel.enabled;
       assert(any, `${s2.name} 應至少啟用一種效果`);
       assert(s2.builtin === true, `${s2.name} 應標記為內建`);
     }

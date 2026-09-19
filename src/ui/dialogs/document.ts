@@ -487,6 +487,29 @@ export async function layerStyleDialog(app: App): Promise<void> {
       ['不透明度', sliderControl(e.stroke.alpha * 100, 0, 100, 1, (v) => { e.stroke.alpha = v / 100; apply(); }, '%', 130)],
       ['寬度', sliderControl(e.stroke.width, 0, 40, 1, (v) => { e.stroke.width = v; apply(); }, ' px', 130)],
     ])),
+    section('內陰影', e.innerShadow.enabled, (v) => { e.innerShadow.enabled = v; }, formGrid([
+      ['顏色', colorChip(e.innerShadow.color, (c) => { e.innerShadow.color = c; apply(); })],
+      ['不透明度', sliderControl(e.innerShadow.alpha * 100, 0, 100, 1, (v) => { e.innerShadow.alpha = v / 100; apply(); }, '%', 130)],
+      ['模糊', sliderControl(e.innerShadow.blur, 0, 100, 1, (v) => { e.innerShadow.blur = v; apply(); }, ' px', 130)],
+      ['X 位移', sliderControl(e.innerShadow.dx, -60, 60, 1, (v) => { e.innerShadow.dx = v; apply(); }, ' px', 130)],
+      ['Y 位移', sliderControl(e.innerShadow.dy, -60, 60, 1, (v) => { e.innerShadow.dy = v; apply(); }, ' px', 130)],
+    ])),
+    section('內光暈', e.innerGlow.enabled, (v) => { e.innerGlow.enabled = v; }, formGrid([
+      ['顏色', colorChip(e.innerGlow.color, (c) => { e.innerGlow.color = c; apply(); })],
+      ['不透明度', sliderControl(e.innerGlow.alpha * 100, 0, 100, 1, (v) => { e.innerGlow.alpha = v / 100; apply(); }, '%', 130)],
+      ['大小', sliderControl(e.innerGlow.blur, 0, 100, 1, (v) => { e.innerGlow.blur = v; apply(); }, ' px', 130)],
+    ])),
+    section('斜角與浮雕', e.bevel.enabled, (v) => { e.bevel.enabled = v; }, formGrid([
+      ['大小', sliderControl(e.bevel.size, 1, 60, 1, (v) => { e.bevel.size = v; apply(); }, ' px', 130)],
+      ['深度', sliderControl(e.bevel.depth, 10, 400, 5, (v) => { e.bevel.depth = v; apply(); }, '%', 130)],
+      ['角度', sliderControl(e.bevel.angle, -180, 180, 1, (v) => { e.bevel.angle = v; apply(); }, '°', 130)],
+      ['不透明度', sliderControl(e.bevel.alpha * 100, 0, 100, 1, (v) => { e.bevel.alpha = v / 100; apply(); }, '%', 130)],
+      ['亮部', colorChip(e.bevel.highlight, (c) => { e.bevel.highlight = c; apply(); })],
+      ['暗部', colorChip(e.bevel.shadow, (c) => { e.bevel.shadow = c; apply(); })],
+      [null, checkboxControl('浮雕（光影延伸到邊緣外）', e.bevel.emboss, (v) => {
+        e.bevel.emboss = v; apply();
+      })],
+    ])),
     section('覆蓋', e.overlay.enabled, (v) => { e.overlay.enabled = v; }, overlayRows()),
     styleRow(),
   ];

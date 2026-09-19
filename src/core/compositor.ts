@@ -2,6 +2,7 @@ import type { Layer } from './types';
 import { createSurface, type Surface } from './surface';
 import { blendSurface } from './blend';
 import { applyAdjustment } from '../filters/adjustments';
+import { gaussianBlur } from '../filters/blur';
 import { rgbCss } from './color';
 import { maskAlpha } from './mask';
 import { opaqueBounds } from './surface';
@@ -71,6 +72,65 @@ function overlayFill(layer: Layer, src: Surface, opt: CompositeOptions): Surface
   return fill;
 }
 
+/** The layer's silhouette: its own alpha, with the colour thrown away. */
+function silhouette(
+  opt: CompositeOptions, drawContent: (ctx: CanvasRenderingContext2D) => void,
+): Surface {
+  const s = createSurface(opt.width, opt.height);
+  drawContent(s.ctx);
+  return s;
+}
+
+/**
+ * Light and shade along the edges, from a height map made by blurring the
+ * silhouette's alpha: where that surface slopes towards the light it gets a
+ * highlight, where it slopes away it gets a shadow.
+ */
+function bevelShading(
+  layer: Layer, opt: CompositeOptions, sil: Surface,
+): Surface | null {
+  const b = layer.effects.bevel;
+  const size = Math.max(1, Math.round(b.size));
+  const { width: w, height: h } = opt;
+
+  const height = sil.ctx.getImageData(0, 0, w, h);
+  gaussianBlur(height, size);
+  const alpha = new Float32Array(w * h);
+  for (let i = 0, p = 3; i < alpha.length; i++, p += 4) alpha[i] = height.data[p] / 255;
+
+  const rad = (b.angle * Math.PI) / 180;
+  // The surface normal is the negated height gradient, and screen y grows
+  // downwards, so both signs flip out of the naive (cos, -sin) light vector.
+  const lx = -Math.cos(rad), ly = Math.sin(rad);
+  const gain = (b.depth / 100) * (255 / Math.max(1, size)) * 2;
+
+  const out = createSurface(w, h);
+  const img = out.ctx.createImageData(w, h);
+  const solid = sil.ctx.getImageData(0, 0, w, h);
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const gx = alpha[y * w + Math.min(w - 1, x + 1)] - alpha[y * w + Math.max(0, x - 1)];
+      const gy = alpha[Math.min(h - 1, y + 1) * w + x] - alpha[Math.max(0, y - 1) * w + x];
+      const lit = (gx * lx + gy * ly) * gain;
+      if (lit === 0) continue;
+      // Emboss lights the outside of the edge too; a plain bevel is clipped
+      // to the layer, so only the inner slope shows.
+      const reach = b.emboss ? Math.max(alpha[i], solid.data[i * 4 + 3] / 255) : solid.data[i * 4 + 3] / 255;
+      if (reach <= 0) continue;
+      const c = lit > 0 ? b.highlight : b.shadow;
+      const p = i * 4;
+      img.data[p] = c.r;
+      img.data[p + 1] = c.g;
+      img.data[p + 2] = c.b;
+      img.data[p + 3] = Math.min(255, Math.abs(lit) * 255) * reach;
+    }
+  }
+  out.ctx.putImageData(img, 0, 0);
+  return out;
+}
+
 /** Render a single layer's pixels into a document-sized surface. */
 function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null {
   const overriding = layer.id === opt.overrideLayerId && !!opt.overrideSurface;
@@ -130,6 +190,63 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
   }
 
   drawContent(out.ctx);
+
+  if (e.innerShadow.enabled || e.innerGlow.enabled || e.bevel.enabled) {
+    const sil = silhouette(opt, drawContent);
+
+    // An inner shadow is the shadow cast by everything *outside* the shape:
+    // fill the canvas, knock the shape out of it, and let that cast inwards.
+    const castInward = (
+      color: string, blur: number, dx: number, dy: number, passes: number,
+    ): void => {
+      const hole = createSurface(opt.width, opt.height);
+      hole.ctx.fillStyle = '#000';
+      hole.ctx.fillRect(0, 0, hole.w, hole.h);
+      hole.ctx.globalCompositeOperation = 'destination-out';
+      hole.ctx.drawImage(sil.canvas, 0, 0);
+
+      const shade = createSurface(opt.width, opt.height);
+      shade.ctx.save();
+      shade.ctx.shadowColor = color;
+      shade.ctx.shadowBlur = blur;
+      shade.ctx.shadowOffsetX = dx + OFFSCREEN;
+      shade.ctx.shadowOffsetY = dy;
+      for (let i = 0; i < passes; i++) shade.ctx.drawImage(hole.canvas, -OFFSCREEN, 0);
+      shade.ctx.restore();
+      // Only the part that falls inside the shape counts.
+      shade.ctx.globalCompositeOperation = 'destination-in';
+      shade.ctx.drawImage(sil.canvas, 0, 0);
+
+      out.ctx.save();
+      out.ctx.globalCompositeOperation = 'source-atop';
+      out.ctx.drawImage(shade.canvas, 0, 0);
+      out.ctx.restore();
+    };
+
+    if (e.innerShadow.enabled) {
+      const c = e.innerShadow.color;
+      castInward(
+        `rgba(${c.r},${c.g},${c.b},${e.innerShadow.alpha})`,
+        e.innerShadow.blur, e.innerShadow.dx, e.innerShadow.dy, 1,
+      );
+    }
+    if (e.innerGlow.enabled) {
+      const c = e.innerGlow.color;
+      castInward(`rgba(${c.r},${c.g},${c.b},${e.innerGlow.alpha})`, e.innerGlow.blur, 0, 0, 3);
+    }
+    if (e.bevel.enabled && e.bevel.alpha > 0) {
+      const shading = bevelShading(layer, opt, sil);
+      if (shading) {
+        out.ctx.save();
+        // Emboss spills past the edge, so it draws over everything; a plain
+        // bevel stays inside the layer.
+        if (!e.bevel.emboss) out.ctx.globalCompositeOperation = 'source-atop';
+        out.ctx.globalAlpha = e.bevel.alpha;
+        out.ctx.drawImage(shading.canvas, 0, 0);
+        out.ctx.restore();
+      }
+    }
+  }
 
   if (e.overlay.enabled && e.overlay.alpha > 0) {
     const fill = overlayFill(layer, src, opt);

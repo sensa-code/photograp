@@ -182,10 +182,29 @@ export interface OverlayEffect {
   scale: number;
 }
 
+/** Light and shade along the layer's own edges. */
+export interface BevelEffect {
+  enabled: boolean;
+  /** How far in from the edge the slope reaches, in pixels. */
+  size: number;
+  /** Strength of the shading, as a percentage. */
+  depth: number;
+  /** Direction the light comes from, in degrees. */
+  angle: number;
+  highlight: RGB;
+  shadow: RGB;
+  alpha: number;
+  /** Emboss also lights the outside of the edge, not just the inside. */
+  emboss: boolean;
+}
+
 export interface LayerEffects {
   dropShadow: { enabled: boolean; color: RGB; alpha: number; blur: number; dx: number; dy: number };
   stroke: { enabled: boolean; color: RGB; alpha: number; width: number };
   glow: { enabled: boolean; color: RGB; alpha: number; blur: number };
+  innerShadow: { enabled: boolean; color: RGB; alpha: number; blur: number; dx: number; dy: number };
+  innerGlow: { enabled: boolean; color: RGB; alpha: number; blur: number };
+  bevel: BevelEffect;
   overlay: OverlayEffect;
 }
 
