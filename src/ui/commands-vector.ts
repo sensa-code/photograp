@@ -17,6 +17,7 @@ import { createSmartObject, renderSmartLayer, replaceSmartSource, smartFilterEnt
 import { rgbCss } from '../core/color';
 import { defaultPathBinding, renderTextLayer } from '../core/text';
 import { flattenPath } from '../core/path';
+import { askSnapshotName } from './panels/history';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
 import { loadImageFile, pickFiles } from '../io/files';
 import { liquifyDialog } from './dialogs/liquify';
@@ -451,6 +452,47 @@ function guidesFromSelection(app: App): void {
   app.changed();
 }
 
+async function takeSnapshot(app: App): Promise<void> {
+  const d = doc(app);
+  if (!d) return;
+  const name = await askSnapshotName(`快照 ${d.history.named.length + 1}`);
+  if (name === null) return;
+  d.history.addNamed(d, name);
+  app.status(`已建立快照「${name}」`);
+  app.changed();
+}
+
+/** Edit > Fill from History: the selection, repainted from the source state. */
+function fillFromHistory(app: App): void {
+  const d = doc(app);
+  const target = d?.paintTarget();
+  if (!d || !target) {
+    app.toast(d?.paintBlockReason() ?? '此圖層無法編輯', 'error');
+    return;
+  }
+  if (target.slot !== 'pixels' || !target.layer) {
+    app.toast('只能填充到圖層像素上', 'error');
+    return;
+  }
+  const src = d.historySource(target.layer);
+  if (!src) { app.toast(d.historySourceReason() ?? '沒有可用的來源', 'error'); return; }
+
+  const out = createSurface(target.surface.w, target.surface.h);
+  out.ctx.drawImage(src.surface.canvas, -src.dx, -src.dy);
+  if (d.selection.active) {
+    // Only the selected part comes back; the rest of the layer is untouched.
+    out.ctx.globalCompositeOperation = 'destination-in';
+    out.ctx.drawImage(d.selection.toSurface().canvas, -target.layer.x, -target.layer.y);
+    out.ctx.globalCompositeOperation = 'destination-over';
+    out.ctx.drawImage(target.surface.canvas, 0, 0);
+  }
+  const dest = d.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.clearRect(0, 0, dest.w, dest.h);
+  dest.ctx.drawImage(out.canvas, 0, 0);
+  d.commit('填滿步驟記錄');
+  app.changed();
+}
+
 /** The active layer when it is type, which is what the path commands act on. */
 const textLayer = (app: App): ReturnType<PhotoDoc['activeLayer']> => {
   const l = doc(app)?.activeLayer();
@@ -602,6 +644,14 @@ export const VECTOR_COMMANDS: Cmd[] = [
   snapToggle('view.snapDocument', '靠齊至文件邊界', 'toDocument'),
   snapToggle('view.snapLayers', '靠齊至圖層', 'toLayers'),
   cmd('view.gridSize', '格點間距…', (a) => gridSizeDialog(a)),
+
+  // ---- history snapshots ----
+  cmd('history.snapshot', '建立快照…', (a) => { void takeSnapshot(a); }, {
+    enabled: (a) => !!doc(a),
+  }),
+  cmd('edit.fillHistory', '填滿步驟記錄', fillFromHistory, {
+    enabled: (a) => !!doc(a)?.paintTarget() && !doc(a)?.historySourceReason(),
+  }),
 
   // ---- type on a path ----
   cmd('text.onPath', '使文字沿路徑', attachTextToPath, {

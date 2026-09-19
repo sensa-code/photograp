@@ -1470,6 +1470,169 @@ async function run(): Promise<void> {
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
   });
 
+  // ---- history snapshots and the history brush ----
+  group('步驟記錄快照');
+  await test('快照不會變成一個步驟', () => {
+    const doc = PhotoDoc.createBlank('snap', 32, 32, 'white');
+    const steps = doc.history.snapshots.length;
+    doc.history.addNamed(doc, '起始');
+    assert(doc.history.snapshots.length === steps, '建立快照不應新增步驟');
+    assert(doc.history.named.length === 1, '應記下一個快照');
+    assert(doc.history.named[0].name === '起始', '快照名稱');
+  });
+  await test('快照還原會變成可還原的步驟', () => {
+    const doc = PhotoDoc.createBlank('snap-restore', 32, 32, 'white');
+    const layer = doc.layers[0];
+    const entry = doc.history.addNamed(doc, '白底');
+    const surface = doc.mutableSurface(layer);
+    surface.ctx.fillStyle = '#ff0000';
+    surface.ctx.fillRect(0, 0, 32, 32);
+    doc.commit('塗紅');
+    assert(pixel(doc.layers[0].surface!, 5, 5)[0] > 200, '塗完應是紅的');
+    assert(doc.restoreNamed(entry.id), '還原應成功');
+    const back = pixel(doc.layers[0].surface!, 5, 5);
+    assert(back[1] > 200 && back[2] > 200, `還原後應回到白底，實得 ${back}`);
+    assert(doc.history.snapshots[doc.history.index].label.includes('白底'), '應記下一筆快照步驟');
+    doc.undo();
+    const red = pixel(doc.layers[0].surface!, 5, 5);
+    assert(red[0] > 200 && red[1] < 80, `還原本身也能被還原，實得 ${red}`);
+  });
+  await test('刪除快照會一併清掉來源標記', () => {
+    const doc = PhotoDoc.createBlank('snap-del', 16, 16, 'white');
+    const entry = doc.history.addNamed(doc, 'A');
+    doc.history.source = entry.snap;
+    doc.history.removeNamed(entry.id);
+    assert(doc.history.named.length === 0, '快照應被刪除');
+    assert(doc.history.source === null, '來源應回到預設');
+  });
+  await test('未指定時來源是最舊的步驟', () => {
+    const doc = PhotoDoc.createBlank('snap-default', 16, 16, 'white');
+    doc.commit('第二步');
+    assert(doc.history.sourceSnapshot() === doc.history.snapshots[0], '預設應是第一個步驟');
+    doc.history.source = doc.history.snapshots[1];
+    assert(doc.history.sourceSnapshot() === doc.history.snapshots[1], '指定後應改用指定的');
+  });
+  await test('清除步驟記錄會一併清掉快照與來源', () => {
+    const doc = PhotoDoc.createBlank('snap-clear', 16, 16, 'white');
+    const entry = doc.history.addNamed(doc, 'A');
+    doc.history.source = entry.snap;
+    doc.history.clear();
+    assert(doc.history.named.length === 0 && doc.history.source === null, '應全部清掉');
+  });
+
+  group('步驟記錄筆刷');
+  const redDoc = (): PhotoDoc => {
+    const doc = PhotoDoc.createBlank('hb', 64, 64, 'white');
+    const layer = doc.layers[0];
+    const surface = doc.mutableSurface(layer);
+    surface.ctx.fillStyle = '#ff0000';
+    surface.ctx.fillRect(0, 0, 64, 64);
+    doc.commit('塗紅');
+    return doc;
+  };
+  await test('來源會對應到同一個圖層', () => {
+    const doc = redDoc();
+    const layer = doc.layers[0];
+    const src = doc.historySource(layer)!;
+    assert(src, '應找得到來源');
+    assert(pixel(src.surface, 5, 5)[0] > 200 && pixel(src.surface, 5, 5)[1] > 200,
+      '來源應是塗紅之前的白底');
+    assert(src.dx === 0 && src.dy === 0, '圖層沒移動時不需要位移');
+    assert(doc.historySourceReason() === null, '來源可用時不應有阻擋原因');
+  });
+  await test('圖層移動過會反映在來源位移上', () => {
+    const doc = redDoc();
+    const layer = doc.layers[0];
+    layer.x = 12; layer.y = -4;
+    const src = doc.historySource(layer)!;
+    near(src.dx, 12, 0.001, '水平位移');
+    near(src.dy, -4, 0.001, '垂直位移');
+  });
+  await test('尺寸不同的來源會被拒絕', () => {
+    const doc = redDoc();
+    doc.resampleTo(128, 128);
+    assert(doc.historySource(doc.layers[0]) === null, '尺寸不同時不應回傳來源');
+    assert(doc.historySourceReason()?.includes('尺寸'), '應說明是尺寸問題');
+  });
+  await test('來源狀態沒有這個圖層時會被拒絕', () => {
+    const doc = redDoc();
+    const added = createRasterLayer('新圖層', 64, 64);
+    doc.layers.push(added);
+    doc.activeLayerId = added.id;
+    doc.commit('新增圖層');
+    assert(doc.historySource(added) === null, '來源中沒有這個圖層');
+    assert(doc.historySourceReason()?.includes('不存在'), '應說明圖層不存在');
+  });
+  await test('筆刷會把塗過的地方改回舊狀態', () => {
+    const doc = redDoc();
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const tool = TOOLS.find((t) => t.id === 'history-brush')!;
+    app.options(tool.id, { ...optionDefaults(tool), size: 24, hardness: 100 });
+    tool.down(pointer(doc, 32, 32));
+    tool.up(pointer(doc, 32, 32));
+    const layer = doc.layers[0];
+    const centre = pixel(layer.surface!, 32, 32);
+    const corner = pixel(layer.surface!, 2, 2);
+    assert(centre[1] > 200 && centre[2] > 200, `刷過的地方應回到白底，實得 ${centre}`);
+    assert(corner[0] > 200 && corner[1] < 80, `沒刷到的地方應還是紅的，實得 ${corner}`);
+    assert(doc.history.snapshots.some((h) => h.label === '步驟記錄筆刷'), '應記下一筆步驟');
+  });
+  await test('改指定來源後筆刷會取新的狀態', () => {
+    const doc = redDoc();
+    app.docs.length = 0;
+    app.addDoc(doc);
+    // Paint blue, then point the brush at the red state rather than the white one.
+    const surface = doc.mutableSurface(doc.layers[0]);
+    surface.ctx.fillStyle = '#0000ff';
+    surface.ctx.fillRect(0, 0, 64, 64);
+    doc.commit('塗藍');
+    doc.history.source = doc.history.snapshots[1];
+    const tool = TOOLS.find((t) => t.id === 'history-brush')!;
+    app.options(tool.id, { ...optionDefaults(tool), size: 24, hardness: 100 });
+    tool.down(pointer(doc, 32, 32));
+    tool.up(pointer(doc, 32, 32));
+    const centre = pixel(doc.layers[0].surface!, 32, 32);
+    assert(centre[0] > 200 && centre[2] < 80, `應回到紅色而不是白色，實得 ${centre}`);
+  });
+  await test('填滿步驟記錄只改選取範圍', () => {
+    const doc = redDoc();
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const box = new Path2D();
+    box.rect(8, 8, 24, 24);
+    doc.selection.combine(rasterizePath(box, 64, 64), 'replace');
+    runCommand(app, 'edit.fillHistory');
+    const layer = doc.layers[0];
+    const inside = pixel(layer.surface!, 20, 20);
+    const outside = pixel(layer.surface!, 50, 50);
+    assert(inside[1] > 200 && inside[2] > 200, `選取內應回到白底，實得 ${inside}`);
+    assert(outside[0] > 200 && outside[1] < 80, `選取外應保持紅色，實得 ${outside}`);
+    assert(doc.history.snapshots.some((h) => h.label === '填滿步驟記錄'), '應記下一筆步驟');
+    doc.selection.clear();
+  });
+  await test('步驟記錄筆刷不碰形狀圖層', () => {
+    const doc = redDoc();
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const shape = createRasterLayer('形狀', 64, 64);
+    shape.kind = 'shape';
+    shape.shape = {
+      path: shapeToVectorPath('rect', 5, 5, 40, 40, 0, 5),
+      style: defaultShapeStyle({ r: 0, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(shape, 64, 64);
+    doc.layers.push(shape);
+    doc.activeLayerId = shape.id;
+    doc.commit('新增形狀');
+    const before = pixel(shape.surface!, 20, 20);
+    const tool = TOOLS.find((t) => t.id === 'history-brush')!;
+    app.options(tool.id, optionDefaults(tool));
+    tool.down(pointer(doc, 20, 20));
+    tool.up(pointer(doc, 20, 20));
+    assert(pixel(shape.surface!, 20, 20).join() === before.join(), '形狀圖層不應被刷到');
+  });
+
   // ---- arc-length sampling and type on a path ----
   group('路徑弧長取樣');
   await test('直線子路徑的長度與取樣', () => {

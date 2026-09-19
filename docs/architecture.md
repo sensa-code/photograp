@@ -130,8 +130,25 @@ UI 透過 `core/app.ts` 的 `App` 單例取得狀態，並以 `Emitter` 發送�
 - 文件的儲存路徑現在也會跟著影像尺寸、版面尺寸與旋轉翻轉一起變換，
   否則改完畫布之後文字會跡到與曲線不同的地方。
 
+## 步驟記錄快照與步驟記錄筆刷
+
+`History` 除了滾動的 `snapshots` 之外，另外持有 `named`（使用者命名的快照）
+與 `source`（步驟記錄筆刷要取樣的狀態）。
+
+- `source` 持有的是 `HistorySnapshot` 物件本身而不是索引，滾動緩衝區丟掉舊步驟
+  時指標才不會默默指到別人。沒指定時 `sourceSnapshot()` 回傳最舊的一步。
+- 快照的像素跟一般步驟一樣是**寫入時複製**共用的，所以存一張快照只花掉
+  圖層紀錄的記憶體，不是一份影像副本。
+- `PhotoDoc.historySource(layer)` 把來源狀態裡同 `id` 的圖層找出來，順便回傳
+  兩者的 `x/y` 差，因為圖層可能在那之後被移動過；尺寸不同或找不到圖層時
+  回傳 `null`，`historySourceReason()` 負責把原因講給使用者聽。
+- 筆刷本身就是以 `DirectStroke` 實作的仿製印章，只是來源換成那張歷史表面、
+  取樣位置不偏移。
+
 ## 面板
 
+- 面板收起時靠 `.panel.collapsed .panel-body { display: none }` 隱藏內容，
+  所以面板本體不要用**行內樣式**設 `display`，否則收起後仍然佔著高度。
 - **色階分佈圖**（`ui/panels/histogram.ts`）：`computeHistogram()` 算出 256 格統計，
   `statsFor()` 再從直方圖直接算平均值、標準差與中間值（不再跑一次像素）。
   結果以 `doc.revision` 加來源做快取，面板收起時 `refresh()` 直接返回，

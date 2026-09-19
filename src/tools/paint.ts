@@ -453,6 +453,77 @@ export class SmudgeTool extends RetouchTool {
   }
 }
 
+/**
+ * Paints the layer back to how it looked in an earlier state. It is the clone
+ * stamp with the source taken from history rather than from another position,
+ * so selective undo becomes a brush.
+ */
+export class HistoryBrushTool implements Tool {
+  id = 'history-brush';
+  name = '步驟記錄筆刷';
+  shortcut = 'y';
+  icon = 'undo';
+  group = 'retouch';
+  showBrushCursor = true;
+  options: ToolOption[] = [
+    sizeOpt(50), hardnessOpt(70), opacityOpt(), flowOpt(),
+  ];
+
+  private ds: DirectStroke | null = null;
+
+  down(e: ToolPointer): void {
+    const target = e.doc.paintTarget();
+    if (!target) { e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法編輯', 'error'); return; }
+    if (target.slot !== 'pixels' || !target.layer) {
+      e.app.toast('步驟記錄筆刷只能畫在圖層像素上', 'error');
+      return;
+    }
+    const src = e.doc.historySource(target.layer);
+    if (!src) {
+      e.app.toast(e.doc.historySourceReason() ?? '沒有可用的步驟記錄來源', 'error');
+      return;
+    }
+
+    const o = e.app.toolOptions[this.id] ?? {};
+    const radius = Math.max(1, Number(o.size ?? 50) / 2);
+    const hardness = Number(o.hardness ?? 70) / 100;
+    const alpha = (Number(o.opacity ?? 100) / 100) * (Number(o.flow ?? 100) / 100);
+
+    this.ds = new DirectStroke(
+      e.doc, target.layer, target.surface, target.slot, Math.max(1, radius * 0.2),
+      (work, x, y, r) => {
+        const reg = patchRegion(work, x, y, r);
+        if (!reg) return;
+        const patch = createSurface(reg.w, reg.h);
+        // The source is another layer-space image; shift by however far the
+        // layer has moved since that state was captured.
+        patch.ctx.drawImage(src.surface.canvas, -(reg.px + src.dx), -(reg.py + src.dy));
+        this.ds!.applyPatch(patch, reg.px, reg.py, r, hardness, alpha);
+      },
+    );
+    this.ds.begin(e.x, e.y, e.pressure, e, radius);
+    e.app.changed();
+  }
+
+  move(e: ToolPointer): void {
+    if (!this.ds) return;
+    const radius = Math.max(1, Number(e.app.toolOptions[this.id]?.size ?? 50) / 2);
+    this.ds.extend(e.x, e.y, e.pressure, e, radius);
+    e.app.changed();
+  }
+
+  up(e: ToolPointer): void {
+    if (!this.ds) return;
+    this.ds.commit('步驟記錄筆刷');
+    this.ds = null;
+    e.app.changed();
+  }
+
+  cancel(app: App): void {
+    if (this.ds) { this.ds.abort(); this.ds = null; app.changed(); }
+  }
+}
+
 export class CloneStampTool implements Tool {
   id = 'clone';
   name = '仿製印章工具';

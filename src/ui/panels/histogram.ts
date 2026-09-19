@@ -71,7 +71,7 @@ export class HistogramPanel {
       style: 'display:grid;grid-template-columns:auto auto auto auto;gap:2px 10px;font-size:11px',
     });
 
-    const body = el('div', { class: 'panel-body', style: 'display:grid;gap:8px' },
+    const body = el('div', { class: 'panel-body' },
       el('div', { style: 'display:flex;gap:6px' },
         selectControl('rgb', [
           { value: 'rgb', label: '明度' },

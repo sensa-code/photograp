@@ -127,6 +127,42 @@ export class PhotoDoc {
 
   clonePaths(): VectorPath[] { return this.paths.map(clonePath); }
 
+  /**
+   * The pixels of `layer` as they were in the history brush's source state,
+   * with the shift needed to read them in the layer's current space. Null when
+   * that state has no usable version of this layer, which is what disables the
+   * history brush instead of painting something arbitrary.
+   */
+  historySource(layer: Layer): { surface: Surface; dx: number; dy: number } | null {
+    const snap = this.history.sourceSnapshot();
+    if (!snap || snap.width !== this.width || snap.height !== this.height) return null;
+    const found = findParent(snap.layers, layer.id);
+    const from = found ? found.list[found.index] : null;
+    if (!from?.surface) return null;
+    return { surface: from.surface, dx: layer.x - from.x, dy: layer.y - from.y };
+  }
+
+  /** Why the history brush has nothing to paint from, phrased for the user. */
+  historySourceReason(): string | null {
+    const snap = this.history.sourceSnapshot();
+    if (!snap) return '沒有可用的步驟記錄來源';
+    if (snap.width !== this.width || snap.height !== this.height) {
+      return '來源狀態的尺寸不同，請重新指定步驟記錄來源';
+    }
+    const layer = this.activeLayer();
+    if (!layer) return '請先選擇一個圖層';
+    return this.historySource(layer) ? null : '這個圖層在來源狀態中不存在';
+  }
+
+  /** Restore a parked snapshot as a new step, so it can be undone. */
+  restoreNamed(id: string): boolean {
+    const entry = this.history.named.find((n) => n.id === id);
+    if (!entry) return false;
+    this.history.restore(this, entry.snap);
+    this.commit(`快照：${entry.name}`);
+    return true;
+  }
+
   /** Re-render every layer whose pixels are generated from other data. */
   refreshGeneratedLayers(): void {
     for (const l of this.allLayers()) {

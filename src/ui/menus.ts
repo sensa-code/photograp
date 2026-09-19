@@ -49,6 +49,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
     items: [
       cmdEntry('edit.undo'),
       cmdEntry('edit.redo'),
+      cmdEntry('history.snapshot'),
       sep,
       cmdEntry('edit.cut'),
       cmdEntry('edit.copy'),
@@ -57,6 +58,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       cmdEntry('edit.clear'),
       sep,
       cmdEntry('edit.fill'),
+      cmdEntry('edit.fillHistory'),
       cmdEntry('edit.contentAwareFill'),
       cmdEntry('edit.fillFg'),
       cmdEntry('edit.fillBg'),

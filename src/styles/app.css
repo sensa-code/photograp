@@ -325,9 +325,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel.collapsed .layer-controls,
 .panel.collapsed .layer-filter { display: none; }
 .panel.collapsed { flex: 0 0 auto; min-height: 0; }
-/* The graph and its statistics need their full height to be readable,
-   so this panel never gets squeezed — the panel column scrolls instead. */
-.panel-histogram:not(.collapsed) { flex: 0 0 auto; }
+/* These two are sized by their own content — a squeezed graph or a one-row
+   step list is no use — so they keep their height and the column scrolls. */
+.panel-histogram .panel-body { display: grid; gap: 8px; }
+.panel-histogram:not(.collapsed),
+.panel-history:not(.collapsed) { flex: 0 0 auto; }
+/* The rest may shrink, but not past the point of being readable. */
+.panels > .panel:not(.grow):not(.collapsed) { min-height: 104px; }
 .panel-head .caret { color: var(--text-dim); transition: transform .12s; }
 .panel.collapsed .panel-head .caret { transform: rotate(-90deg); }
 
@@ -456,6 +460,24 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 
 /* history */
+
+.history-source {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-sunken);
+  color: var(--accent);
+}
+.history-source:hover { border-color: var(--accent); }
+.history-source.on { background: var(--accent-dim); color: #fff; }
+.history-row.snapshot { color: var(--text-bright); }
+.history-row.snapshot .mini-btn { margin-left: auto; opacity: 0; }
+.history-row.snapshot:hover .mini-btn { opacity: 0.7; }
 
 .history-row {
   display: flex;

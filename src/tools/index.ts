@@ -1,5 +1,8 @@
 import type { Tool } from './types';
-import { BrushTool, PencilTool, EraserTool, BlurSharpenTool, DodgeBurnTool, SmudgeTool, CloneStampTool } from './paint';
+import {
+  BrushTool, PencilTool, EraserTool, BlurSharpenTool, DodgeBurnTool, SmudgeTool,
+  CloneStampTool, HistoryBrushTool,
+} from './paint';
 import { MarqueeTool, LassoTool, PolygonLassoTool, MagicWandTool } from './select';
 import { MoveTool, HandTool, ZoomTool, EyedropperTool, CropTool } from './nav';
 import { BucketTool, GradientTool, ShapeTool, TextTool } from './draw';
@@ -24,6 +27,7 @@ export const TOOLS: Tool[] = [
   new SpotHealingBrushTool(),
   new HealingBrushTool(),
   new CloneStampTool(),
+  new HistoryBrushTool(),
   new SmudgeTool(),
   new BlurSharpenTool(),
   new DodgeBurnTool(),
@@ -46,7 +50,7 @@ export const TOOL_SLOTS: string[][] = [
   ['eyedropper'],
   ['brush', 'pencil', 'eraser'],
   ['spot-heal', 'heal'],
-  ['clone', 'smudge', 'blur-sharpen', 'dodge-burn'],
+  ['clone', 'history-brush', 'smudge', 'blur-sharpen', 'dodge-burn'],
   ['bucket', 'gradient'],
   ['pen', 'direct-select'],
   ['text', 'shape'],

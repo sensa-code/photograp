@@ -1,3 +1,4 @@
+import { uid } from './ids';
 import type { Layer } from './types';
 import { shallowCopyLayer } from './layer';
 import { Selection } from './selection';
@@ -20,6 +21,13 @@ export interface HistorySnapshot {
   quickMask: QuickMask | null;
   guides: Guide[];
   guidesLocked: boolean;
+}
+
+/** A history state the user parked under a name of their own. */
+export interface NamedSnapshot {
+  id: string;
+  name: string;
+  snap: HistorySnapshot;
 }
 
 export interface HistoryHost {
@@ -46,6 +54,13 @@ export class History {
   snapshots: HistorySnapshot[] = [];
   index = -1;
   limit = 50;
+  /** States parked by name; these survive the rolling step limit. */
+  named: NamedSnapshot[] = [];
+  /**
+   * What the history brush paints from. Holding the snapshot itself rather
+   * than an index keeps it valid when the rolling buffer drops older steps.
+   */
+  source: HistorySnapshot | null = null;
 
   get canUndo(): boolean { return this.index > 0; }
   get canRedo(): boolean { return this.index < this.snapshots.length - 1; }
@@ -121,8 +136,31 @@ export class History {
     return true;
   }
 
+  /** Park the current state under a name. Taking one is not itself a step. */
+  addNamed(host: HistoryHost, name: string): NamedSnapshot {
+    const entry = { id: uid('s'), name, snap: this.capture(host, name) };
+    this.named.push(entry);
+    return entry;
+  }
+
+  removeNamed(id: string): void {
+    const entry = this.named.find((n) => n.id === id);
+    if (entry && this.source === entry.snap) this.source = null;
+    this.named = this.named.filter((n) => n.id !== id);
+  }
+
+  /**
+   * The state the history brush reads from: whatever the user marked, else
+   * the oldest step still held, which is the document as it was opened.
+   */
+  sourceSnapshot(): HistorySnapshot | null {
+    return this.source ?? this.snapshots[0] ?? null;
+  }
+
   clear(): void {
     this.snapshots.length = 0;
     this.index = -1;
+    this.named = [];
+    this.source = null;
   }
 }
