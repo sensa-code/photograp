@@ -7,6 +7,9 @@ import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
 import type { Rect } from '../src/core/geometry';
 import {
+  applyMatrix, homography, quadArea, quadIsUsable, quadSides, suggestedSize, warpQuad,
+} from '../src/core/perspective';
+import {
   applyComp, captureComp, cloneComp, describeComp, normalizeComp, recaptureComp,
 } from '../src/core/comps';
 import {
@@ -1977,6 +1980,163 @@ async function run(): Promise<void> {
     assert(cachedPatternSurface(embeddedPattern(overlay)!) === null, '先確定沒快取');
     await warmEmbedded([overlay]);
     assert(cachedPatternSurface(embeddedPattern(overlay)!), 'warmEmbedded 後應已在快取中');
+  });
+
+  // ---- perspective ----
+  group('透視變換');
+  const pt = (x: number, y: number): { x: number; y: number } => ({ x, y });
+
+  await test('同一組點的變換是恒等', () => {
+    const q = [pt(0, 0), pt(10, 0), pt(10, 8), pt(0, 8)];
+    const m = homography(q, q)!;
+    assert(m, '應解得出來');
+    for (const p of [pt(3, 2), pt(9, 7), pt(0, 0)]) {
+      const out = applyMatrix(m, p);
+      near(out.x, p.x, 0.001, '恒等變換的 x');
+      near(out.y, p.y, 0.001, '恒等變換的 y');
+    }
+  });
+  await test('變換會把四個角準確送到位', () => {
+    const from = [pt(2, 3), pt(40, 7), pt(37, 33), pt(5, 29)];
+    const to = [pt(0, 0), pt(100, 0), pt(100, 60), pt(0, 60)];
+    const m = homography(from, to)!;
+    assert(m, '應解得出來');
+    for (let i = 0; i < 4; i++) {
+      const out = applyMatrix(m, from[i]);
+      near(out.x, to[i].x, 0.01, `第 ${i} 個角的 x`);
+      near(out.y, to[i].y, 0.01, `第 ${i} 個角的 y`);
+    }
+  });
+  await test('退化的點組會回傳 null', () => {
+    const flat = [pt(0, 0), pt(10, 0), pt(20, 0), pt(30, 0)];
+    const rect = [pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10)];
+    assert(homography(flat, rect) === null, '共線的來源點無法解');
+    assert(homography([pt(0, 0)], rect) === null, '點數不對應回傳 null');
+  });
+  await test('逆變換與正變換互相抵消', () => {
+    const from = [pt(4, 6), pt(90, 2), pt(96, 70), pt(1, 62)];
+    const to = [pt(0, 0), pt(80, 0), pt(80, 50), pt(0, 50)];
+    const fwd = homography(from, to)!;
+    const inv = homography(to, from)!;
+    for (const p of [pt(10, 12), pt(70, 40), pt(50, 25)]) {
+      const round = applyMatrix(inv, applyMatrix(fwd, p));
+      near(round.x, p.x, 0.02, '往返後的 x');
+      near(round.y, p.y, 0.02, '往返後的 y');
+    }
+  });
+  await test('建議尺寸取對邊中較長的那一邊', () => {
+    // A trapezoid: the bottom edge is nearer the camera and so longer.
+    const quad = [pt(20, 0), pt(80, 0), pt(100, 50), pt(0, 50)];
+    const sides = quadSides(quad);
+    near(sides[0], 60, 0.001, '上邊長');
+    near(sides[2], 100, 0.001, '下邊長');
+    const size = suggestedSize(quad);
+    assert(size.w === 100, `寬度應取較長的 100，實得 ${size.w}`);
+    assert(size.h >= 50, `高度至少 50，實得 ${size.h}`);
+  });
+  await test('只接受沒有交叉的四邊形', () => {
+    const good = [pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10)];
+    assert(quadIsUsable(good), '正方形應可用');
+    // A bow tie: the two diagonals are swapped, so the shape folds over.
+    const bowtie = [pt(0, 0), pt(10, 0), pt(0, 10), pt(10, 10)];
+    assert(!quadIsUsable(bowtie), '交叉的四邊形不可用');
+    assert(!quadIsUsable([pt(0, 0), pt(1, 0), pt(1, 1), pt(0, 1)]), '太小的不可用');
+    assert(!quadIsUsable([pt(0, 0), pt(10, 0), pt(20, 0), pt(30, 0)]), '共線的不可用');
+    assert(!quadIsUsable(good.slice(0, 3)), '不是四個點的不可用');
+  });
+  await test('面積的符號跟著繞行方向', () => {
+    const cw = [pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10)];
+    near(Math.abs(quadArea(cw)), 100, 0.001, '正方形面積');
+    assert(quadArea(cw) > 0, '順時針為正');
+    assert(quadArea([...cw].reverse()) < 0, '逆時針為負');
+  });
+  await test('將歪斜的四邊形拉成矩形', () => {
+    // Paint a checkerboard, then read it back through a slanted quad.
+    const src = createSurface(80, 80);
+    src.ctx.fillStyle = '#ffffff';
+    src.ctx.fillRect(0, 0, 80, 80);
+    src.ctx.fillStyle = '#000000';
+    src.ctx.fillRect(0, 0, 40, 40);
+    src.ctx.fillRect(40, 40, 40, 40);
+    const out = warpQuad(src, [pt(0, 0), pt(80, 0), pt(80, 80), pt(0, 80)], 40, 40)!;
+    assert(out.w === 40 && out.h === 40, '輸出尺寸');
+    assert(pixel(out, 8, 8)[0] < 60, `左上應是黑的，實得 ${pixel(out, 8, 8)}`);
+    assert(pixel(out, 32, 8)[0] > 200, `右上應是白的，實得 ${pixel(out, 32, 8)}`);
+    assert(pixel(out, 32, 32)[0] < 60, `右下應是黑的，實得 ${pixel(out, 32, 32)}`);
+  });
+  await test('只拉出四邊形包到的那一塊', () => {
+    const src = createSurface(100, 100);
+    src.ctx.fillStyle = '#ffffff';
+    src.ctx.fillRect(0, 0, 100, 100);
+    src.ctx.fillStyle = '#ff0000';
+    src.ctx.fillRect(50, 50, 50, 50);
+    // Take just the red corner and stretch it to fill the output.
+    const out = warpQuad(src, [pt(50, 50), pt(100, 50), pt(100, 100), pt(50, 100)], 30, 30)!;
+    for (const [x, y] of [[4, 4], [15, 15], [26, 26]]) {
+      const px = pixel(out, x, y);
+      assert(px[0] > 200 && px[1] < 80, `${x},${y} 應全是紅的，實得 ${px}`);
+    }
+  });
+  await test('歪斜拍的矩形會被拉直', () => {
+    // Draw a trapezoid with a straight top edge; after the warp its edges
+    // should be vertical, i.e. the same column is filled on every row.
+    const src = createSurface(120, 80);
+    src.ctx.fillStyle = '#ffffff';
+    src.ctx.fillRect(0, 0, 120, 80);
+    src.ctx.fillStyle = '#1060c0';
+    src.ctx.beginPath();
+    src.ctx.moveTo(40, 10);
+    src.ctx.lineTo(80, 10);
+    src.ctx.lineTo(110, 70);
+    src.ctx.lineTo(10, 70);
+    src.ctx.closePath();
+    src.ctx.fill();
+    const out = warpQuad(src, [pt(40, 10), pt(80, 10), pt(110, 70), pt(10, 70)], 60, 60)!;
+    const blueAt = (y: number): number => {
+      let n = 0;
+      for (let x = 0; x < out.w; x++) if (pixel(out, x, y)[2] > 150 && pixel(out, x, y)[0] < 120) n++;
+      return n;
+    };
+    // Every row of the straightened image should be full width.
+    assert(blueAt(10) > 55 && blueAt(50) > 55, `拉直後每一列都應滿寬，實得 ${blueAt(10)} / ${blueAt(50)}`);
+  });
+  await test('透視裁切工具會換掉文件尺寸', () => {
+    const doc = PhotoDoc.createBlank('persp', 120, 80, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const s2 = doc.mutableSurface(doc.layers[0]);
+    s2.ctx.fillStyle = '#20a020';
+    s2.ctx.fillRect(20, 10, 60, 40);
+    doc.commit('底圖');
+    const tool = TOOLS.find((t) => t.id === 'perspective-crop')! as typeof TOOLS[number] & {
+      quad: { x: number; y: number }[] | null;
+      apply: (a: typeof app) => void;
+    };
+    app.options(tool.id, optionDefaults(tool));
+    tool.down(pointer(doc, 20, 10));
+    tool.move(pointer(doc, 80, 50, { sx: 20, sy: 10 }));
+    tool.up(pointer(doc, 80, 50, { sx: 20, sy: 10 }));
+    assert(tool.quad, '拖曳後應有四邊形');
+    tool.apply(app);
+    assert(doc.width === 60 && doc.height === 40, `應變成 60×40，實得 ${doc.width}×${doc.height}`);
+    assert(doc.layers.length === 1, '結果應是一個平面化的圖層');
+    assert(pixel(doc.layers[0].surface!, 30, 20)[1] > 130, '內容應是那塊綠色');
+    assert(doc.history.snapshots.some((h) => h.label === '透視裁切'), '應記下步驟');
+    assert(tool.quad === null, '套用後應清掉四邊形');
+  });
+  await test('交叉的四邊形不會被套用', () => {
+    const doc = PhotoDoc.createBlank('persp-bad', 60, 60, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const tool = TOOLS.find((t) => t.id === 'perspective-crop')! as typeof TOOLS[number] & {
+      quad: { x: number; y: number }[] | null;
+      apply: (a: typeof app) => void;
+    };
+    tool.quad = [pt(0, 0), pt(40, 0), pt(0, 40), pt(40, 40)];
+    tool.apply(app);
+    assert(doc.width === 60, '文件不應被改到');
+    assert(!doc.history.snapshots.some((h) => h.label === '透視裁切'), '不應記下步驟');
+    tool.cancel?.(app);
   });
 
   // ---- layer comps ----

@@ -59,6 +59,17 @@ export class OptionsBar {
       this.root.append(el('div', { class: 'opt' }, flipH, flipV, rot, apply, cancel));
     }
 
+    if (tool.id === 'perspective-crop') {
+      const apply = el('button', { class: 'btn primary', text: '套用透視裁切 (Enter)' });
+      on(apply, 'click', () => {
+        const t = getTool('perspective-crop') as Tool & { apply: (a: App) => void };
+        t.apply(this.app);
+      });
+      this.root.append(el('div', { class: 'opt' },
+        el('span', { class: 'hint', text: '拖曳框住目標，再拖四個角對齊邊緣' }),
+        apply));
+    }
+
     if (tool.id === 'crop') {
       const apply = el('button', { class: 'btn primary', text: '套用裁切 (Enter)' });
       on(apply, 'click', () => {

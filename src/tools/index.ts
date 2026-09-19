@@ -9,9 +9,11 @@ import { BucketTool, GradientTool, ShapeTool, TextTool } from './draw';
 import { TransformTool } from './transform';
 import { PenTool, DirectSelectTool } from './pen';
 import { SpotHealingBrushTool, HealingBrushTool } from './heal';
+import { PerspectiveCropTool } from './perspective-crop';
 
 export const transformTool = new TransformTool();
 export const cropTool = new CropTool();
+export const perspectiveCropTool = new PerspectiveCropTool();
 
 export const TOOLS: Tool[] = [
   new MoveTool(),
@@ -20,6 +22,7 @@ export const TOOLS: Tool[] = [
   new PolygonLassoTool(),
   new MagicWandTool(),
   cropTool,
+  perspectiveCropTool,
   new EyedropperTool(),
   new BrushTool(),
   new PencilTool(),
@@ -47,7 +50,7 @@ export const TOOLS: Tool[] = [
 export const TOOL_SLOTS: string[][] = [
   ['move'],
   ['marquee', 'lasso', 'poly-lasso', 'wand'],
-  ['crop'],
+  ['crop', 'perspective-crop'],
   ['eyedropper'],
   ['brush', 'pencil', 'eraser'],
   ['spot-heal', 'heal'],
