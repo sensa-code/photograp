@@ -30,6 +30,8 @@ export type { Cmd } from './command-types';
 
 const hasDoc = (app: App): boolean => app.activeDoc() !== null;
 const hasSelection = (app: App): boolean => app.activeDoc()?.selection.active ?? false;
+const canPaint = (app: App): boolean => app.activeDoc()?.paintTarget() !== null
+  && app.activeDoc()?.paintTarget() !== undefined;
 const hasRaster = (app: App): boolean => {
   const l = app.activeDoc()?.activeLayer();
   return !!l && !!l.surface && !l.locked;
@@ -60,35 +62,50 @@ function extractSelection(app: App, merged: boolean): { canvas: HTMLCanvasElemen
 
 function clearSelectionPixels(app: App, label: string): void {
   const doc = app.activeDoc();
-  const layer = doc?.activeLayer();
-  if (!doc || !layer || !layer.surface || layer.locked) return;
-  const target = doc.mutableSurface(layer);
-  if (doc.selection.active) {
-    target.ctx.save();
-    target.ctx.globalCompositeOperation = 'destination-out';
-    target.ctx.drawImage(doc.selection.toSurface().canvas, -layer.x, -layer.y);
-    target.ctx.restore();
+  const target = doc?.paintTarget();
+  if (!doc || !target) return;
+  const dest = doc.mutablePaintSurface(target.layer, target.slot);
+  // Masks and Quick Mask are opaque greyscale, so clearing means
+  // painting the background colour rather than erasing alpha.
+  const erase = target.slot === 'pixels';
+  dest.ctx.save();
+  if (target.clipToSelection && doc.selection.active) {
+    if (erase) {
+      dest.ctx.globalCompositeOperation = 'destination-out';
+      dest.ctx.drawImage(doc.selection.toSurface().canvas, -target.offX, -target.offY);
+    } else {
+      const fill = createSurface(dest.w, dest.h);
+      fill.ctx.fillStyle = rgbCss(app.background);
+      fill.ctx.fillRect(0, 0, fill.w, fill.h);
+      fill.ctx.globalCompositeOperation = 'destination-in';
+      fill.ctx.drawImage(doc.selection.toSurface().canvas, -target.offX, -target.offY);
+      dest.ctx.drawImage(fill.canvas, 0, 0);
+    }
+  } else if (erase) {
+    dest.ctx.clearRect(0, 0, dest.w, dest.h);
   } else {
-    target.ctx.clearRect(0, 0, target.w, target.h);
+    dest.ctx.fillStyle = rgbCss(app.background);
+    dest.ctx.fillRect(0, 0, dest.w, dest.h);
   }
+  dest.ctx.restore();
   doc.commit(label);
   app.changed();
 }
 
 function fillWith(app: App, which: 'foreground' | 'background'): void {
   const doc = app.activeDoc();
-  const layer = doc?.activeLayer();
-  if (!doc || !layer || !layer.surface || layer.locked) return;
+  const target = doc?.paintTarget();
+  if (!doc || !target) return;
   const color = which === 'foreground' ? app.foreground : app.background;
   const paint = createSurface(doc.width, doc.height);
   paint.ctx.fillStyle = rgbCss(color);
   paint.ctx.fillRect(0, 0, paint.w, paint.h);
-  if (doc.selection.active) {
+  if (target.clipToSelection && doc.selection.active) {
     paint.ctx.globalCompositeOperation = 'destination-in';
     paint.ctx.drawImage(doc.selection.toSurface().canvas, 0, 0);
   }
-  const target = doc.mutableSurface(layer);
-  target.ctx.drawImage(paint.canvas, -layer.x, -layer.y);
+  const dest = doc.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.drawImage(paint.canvas, -target.offX, -target.offY);
   doc.commit(which === 'foreground' ? '填入前景色' : '填入背景色');
   app.changed();
 }
@@ -434,11 +451,11 @@ export const COMMANDS: CmdType[] = [
     if (data) { a.clipboard = data; a.toast('已拷貝合併影像', 'success'); }
   }, { shortcut: 'Ctrl+Shift+C', enabled: hasDoc }),
   cmd('edit.paste', '貼上', (a) => pasteFromApp(a), { shortcut: 'Ctrl+V', enabled: hasDoc }),
-  cmd('edit.clear', '清除', (a) => clearSelectionPixels(a, '清除'), { shortcut: 'Delete', enabled: hasRaster }),
-  cmd('edit.fill', '填滿…', (a) => fillDialog(a), { shortcut: 'Shift+F5', enabled: hasRaster }),
-  cmd('edit.fillFg', '填入前景色', (a) => fillWith(a, 'foreground'), { shortcut: 'Alt+Backspace', enabled: hasRaster }),
-  cmd('edit.fillBg', '填入背景色', (a) => fillWith(a, 'background'), { shortcut: 'Ctrl+Backspace', enabled: hasRaster }),
-  cmd('edit.stroke', '筆畫…', (a) => strokeDialog(a), { enabled: hasRaster }),
+  cmd('edit.clear', '清除', (a) => clearSelectionPixels(a, '清除'), { shortcut: 'Delete', enabled: canPaint }),
+  cmd('edit.fill', '填滿…', (a) => fillDialog(a), { shortcut: 'Shift+F5', enabled: canPaint }),
+  cmd('edit.fillFg', '填入前景色', (a) => fillWith(a, 'foreground'), { shortcut: 'Alt+Backspace', enabled: canPaint }),
+  cmd('edit.fillBg', '填入背景色', (a) => fillWith(a, 'background'), { shortcut: 'Ctrl+Backspace', enabled: canPaint }),
+  cmd('edit.stroke', '筆畫…', (a) => strokeDialog(a), { enabled: canPaint }),
   cmd('edit.transform', '任意變形', (a) => { transformTool.start(a); }, { shortcut: 'Ctrl+T', enabled: hasRaster }),
   cmd('edit.flipLayerH', '水平翻轉圖層', (a) => flipLayer(a, 'h'), { enabled: hasRaster }),
   cmd('edit.flipLayerV', '垂直翻轉圖層', (a) => flipLayer(a, 'v'), { enabled: hasRaster }),

@@ -11,12 +11,29 @@ import { compositeLayers, type CompositeOptions } from './compositor';
 import { clonePath, type VectorPath } from './path';
 import { renderChannelView, type AlphaChannel, type ChannelView } from './channels';
 import { renderSmartLayer } from './smart';
+import {
+  createQuickMask, quickMaskCoverage, quickMaskIsFull, renderQuickMaskOverlay, type QuickMask,
+} from './quickmask';
 
 export interface LivePreview {
   layerId: string;
   surface: Surface;
   /** The preview replaces the layer mask rather than its pixels. */
   isMask: boolean;
+}
+
+/** Where a painting tool writes: layer pixels, a layer mask, or Quick Mask. */
+export type PaintSlot = 'pixels' | 'mask' | 'quickmask';
+
+export interface PaintTarget {
+  layer: Layer | null;
+  surface: Surface;
+  slot: PaintSlot;
+  /** Offset of the target surface inside the document. */
+  offX: number;
+  offY: number;
+  /** Quick Mask edits the selection itself, so it is never clipped by one. */
+  clipToSelection: boolean;
 }
 
 export class PhotoDoc {
@@ -39,6 +56,10 @@ export class PhotoDoc {
   channels: AlphaChannel[] = [];
   /** Which channel the canvas shows; not part of the undo history. */
   channelView: ChannelView = 'rgb';
+  /** Non-null while Quick Mask mode is on. */
+  quickMask: QuickMask | null = null;
+  /** In-progress edit of the quick mask, shown instead of the stored one. */
+  quickMaskPreview: Surface | null = null;
 
   private cache: Surface | null = null;
   private cacheKey = '';
@@ -158,16 +179,70 @@ export class PhotoDoc {
   }
 
   /** The surface painting tools should target right now. */
-  paintTarget(): { layer: Layer; surface: Surface; isMask: boolean } | null {
+  paintTarget(): PaintTarget | null {
+    // Quick Mask takes over every painting tool while it is on.
+    if (this.quickMask) {
+      return {
+        layer: null, surface: this.quickMask.surface, slot: 'quickmask',
+        offX: 0, offY: 0, clipToSelection: false,
+      };
+    }
     const layer = this.activeLayer();
     if (!layer || layer.locked) return null;
     if (this.editingMask && layer.mask) {
-      return { layer, surface: layer.mask, isMask: true };
+      return { layer, surface: layer.mask, slot: 'mask', offX: 0, offY: 0, clipToSelection: true };
     }
     // Smart objects re-render from their source, so direct paint would be lost.
     if (layer.kind === 'smart') return null;
     if (!layer.surface) return null;
-    return { layer, surface: layer.surface, isMask: false };
+    return {
+      layer, surface: layer.surface, slot: 'pixels',
+      offX: layer.x, offY: layer.y, clipToSelection: true,
+    };
+  }
+
+  /** A surface for the given slot that is safe to write into. */
+  mutablePaintSurface(layer: Layer | null, slot: PaintSlot): Surface {
+    if (slot === 'quickmask') return this.mutableQuickMask();
+    if (!layer) throw new Error('沒有可編輯的圖層');
+    return slot === 'mask' ? this.mutableMask(layer) : this.mutableSurface(layer);
+  }
+
+  /** Show work in progress for the given slot without committing it. */
+  setPaintPreview(layer: Layer | null, slot: PaintSlot, surface: Surface): void {
+    if (slot === 'quickmask') {
+      this.quickMaskPreview = surface;
+      return;
+    }
+    if (layer) this.livePreview = { layerId: layer.id, surface, isMask: slot === 'mask' };
+  }
+
+  clearPaintPreview(): void {
+    this.livePreview = null;
+    this.quickMaskPreview = null;
+  }
+
+  mutableQuickMask(): Surface {
+    if (!this.quickMask) this.quickMask = createQuickMask(this.selection, this.width, this.height);
+    else this.quickMask = { ...this.quickMask, surface: cloneSurface(this.quickMask.surface) };
+    return this.quickMask.surface;
+  }
+
+  /** Turn Quick Mask on, seeding it from the current selection. */
+  enterQuickMask(): void {
+    if (this.quickMask) return;
+    this.quickMask = createQuickMask(this.selection, this.width, this.height);
+    this.selection.clear();
+  }
+
+  /** Turn Quick Mask off, converting the painted channel back to a selection. */
+  exitQuickMask(): void {
+    if (!this.quickMask) return;
+    const coverage = quickMaskCoverage(this.quickMask.surface);
+    this.quickMask = null;
+    this.quickMaskPreview = null;
+    if (quickMaskIsFull(coverage)) this.selection.clear();
+    else this.selection.combine(coverage, 'replace');
   }
 
   compositeOptions(): CompositeOptions {
@@ -190,13 +265,18 @@ export class PhotoDoc {
       `${this.width}x${this.height}`,
       this.channelView,
       this.channels.filter((c) => c.visible).map((c) => c.id).join(','),
+      this.quickMask ? 'qm' : '',
     ].join('|');
-    if (this.cache && this.cacheKey === key && !this.livePreview) return this.cache;
+    const live = this.livePreview || this.quickMaskPreview;
+    if (this.cache && this.cacheKey === key && !live) return this.cache;
     let out = compositeLayers(this.layers, this.compositeOptions());
     if (this.channelView !== 'rgb' || this.channels.some((c) => c.visible)) {
       out = renderChannelView(out, this.channelView, this.channels);
     }
-    if (!this.livePreview) { this.cache = out; this.cacheKey = key; }
+    if (this.quickMask) {
+      out = renderQuickMaskOverlay(out, this.quickMask, this.quickMaskPreview);
+    }
+    if (!live) { this.cache = out; this.cacheKey = key; }
     return out;
   }
 
@@ -276,7 +356,34 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h);
+    this.resampleQuickMask(w, h, smooth);
     this.refreshSmartLayers();
+  }
+
+  /** Keep the Quick Mask in step with the document geometry. */
+  private resampleQuickMask(w: number, h: number, smooth: boolean): void {
+    if (!this.quickMask) return;
+    this.quickMask = {
+      ...this.quickMask,
+      surface: resampleSurface(this.quickMask.surface, w, h, smooth),
+    };
+    this.quickMaskPreview = null;
+  }
+
+  /** Re-place the Quick Mask when the canvas grows, shrinks or turns. */
+  private redrawQuickMask(
+    w: number, h: number, draw: (ctx: CanvasRenderingContext2D) => void,
+  ): void {
+    if (!this.quickMask) return;
+    const next = createSurface(w, h);
+    // New canvas area starts unselected, matching a fresh mask.
+    next.ctx.fillStyle = '#000';
+    next.ctx.fillRect(0, 0, w, h);
+    next.ctx.save();
+    draw(next.ctx);
+    next.ctx.restore();
+    this.quickMask = { ...this.quickMask, surface: next };
+    this.quickMaskPreview = null;
   }
 
   /** Canvas Size: keep pixel scale, re-place layers at an offset. */
@@ -305,6 +412,8 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h, offsetX, offsetY);
+    const qmSource = this.quickMask?.surface;
+    if (qmSource) this.redrawQuickMask(w, h, (ctx) => ctx.drawImage(qmSource.canvas, offsetX, offsetY));
     this.refreshSmartLayers();
   }
 
@@ -354,6 +463,10 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h);
+    const qmSource = this.quickMask?.surface;
+    if (qmSource) {
+      this.redrawQuickMask(w, h, (ctx) => { apply(ctx); ctx.drawImage(qmSource.canvas, 0, 0); });
+    }
     this.refreshSmartLayers();
   }
 }

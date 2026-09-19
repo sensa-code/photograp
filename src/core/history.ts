@@ -3,6 +3,7 @@ import { shallowCopyLayer } from './layer';
 import { Selection } from './selection';
 import { clonePath, type VectorPath } from './path';
 import type { AlphaChannel } from './channels';
+import type { QuickMask } from './quickmask';
 
 export interface HistorySnapshot {
   label: string;
@@ -15,6 +16,7 @@ export interface HistorySnapshot {
   paths: VectorPath[];
   activePathId: string | null;
   channels: AlphaChannel[];
+  quickMask: QuickMask | null;
 }
 
 export interface HistoryHost {
@@ -26,6 +28,7 @@ export interface HistoryHost {
   paths: VectorPath[];
   activePathId: string | null;
   channels: AlphaChannel[];
+  quickMask: QuickMask | null;
 }
 
 /**
@@ -55,6 +58,9 @@ export class History {
       activePathId: host.activePathId,
       // Channel surfaces are shared copy-on-write, like layer pixels.
       channels: host.channels.map((c) => ({ ...c, color: { ...c.color } })),
+      quickMask: host.quickMask
+        ? { ...host.quickMask, color: { ...host.quickMask.color } }
+        : null,
     };
   }
 
@@ -80,6 +86,9 @@ export class History {
     host.activePathId = snap.activePathId;
     host.channels.length = 0;
     for (const c of snap.channels) host.channels.push({ ...c, color: { ...c.color } });
+    host.quickMask = snap.quickMask
+      ? { ...snap.quickMask, color: { ...snap.quickMask.color } }
+      : null;
   }
 
   undo(host: HistoryHost): boolean {

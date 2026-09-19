@@ -154,6 +154,10 @@ export class AppUI {
   private renderStatus(): void {
     const doc = this.app.activeDoc();
     if (!doc) { this.statusLeft.textContent = ''; return; }
+    if (doc.quickMask) {
+      this.statusLeft.textContent = '快速遮色片模式：黑色遮蔽、白色取消遮蔽，再按 Q 轉回選取範圍';
+      return;
+    }
     const sel = doc.selection.bounds();
     this.statusLeft.textContent = sel
       ? `選取範圍 ${sel.w} × ${sel.h} px  (${sel.x}, ${sel.y})`

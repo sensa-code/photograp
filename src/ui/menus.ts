@@ -24,6 +24,8 @@ const adjustItems = (prefix: 'adjust' | 'adjustLayer'): MenuEntry[] =>
 const filterMenu = (): MenuEntry[] => [
   cmdEntry('filter.repeat'),
   sep,
+  cmdEntry('filter.liquify'),
+  sep,
   ...FILTER_GROUPS().map((g) => sub(g.group, g.items.map((f) => cmdEntry(`filter.${f.id}`)))),
 ];
 
@@ -156,6 +158,10 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       sep,
       cmdEntry('channel.saveSelection'),
       cmdEntry('channel.loadSelection'),
+      sep,
+      cmdEntry('quickmask.toggle'),
+      cmdEntry('quickmask.options'),
+      cmdEntry('quickmask.toChannel'),
     ],
   },
   { label: '濾鏡', items: filterMenu() },

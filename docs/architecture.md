@@ -110,6 +110,42 @@ UI 透過 `core/app.ts` 的 `App` 單例取得狀態，並以 `Emitter` 發送�
 檢視單一色版時輸出灰階，檢視 RGB 時把「顯示中」的 Alpha 色版以設定的顏色疊印上去，
 效果等同快速遮色片。合成快取的鍵值含 `channelView` 與顯示中的色版清單。
 
+## 快速遮色片
+
+`core/quickmask.ts`。快速遮色片就是「把選取範圍暫時變成一張可塗抹的灰階圖」，
+格式與圖層遮色片、Alpha 色版一致（白 = 選取）。
+
+為了讓所有繪圖工具都能直接編輯它，`PhotoDoc` 把繪製目標抽象成 `PaintSlot`：
+
+```ts
+type PaintSlot = 'pixels' | 'mask' | 'quickmask';
+doc.paintTarget(): { layer, surface, slot } | null
+doc.mutablePaintSurface(layer, slot): Surface
+doc.setPaintPreview(layer, slot, surface): void
+```
+
+`Stroke`、`DirectStroke` 與 `PixelOpSession` 都只認這個 slot，因此筆刷、修圖工具、
+調整、濾鏡與液化不需要各自處理三種目標。快速遮色片模式下 `paintTarget()` 直接回傳
+`quickmask`（且 `layer` 為 null），並且不套用選取範圍裁切——因為它正在編輯選取範圍本身。
+
+疊印在 `PhotoDoc.composite()` 的最後一步由 `renderQuickMaskOverlay()` 畫上；
+離開模式時把灰階轉回覆蓋率，若整張都是 255 就直接取消選取。
+
+## 液化
+
+`filters/liquify.ts` 的 `WarpMesh` 是一張位移網格（預設每 4 像素一個節點），
+語意是 **取樣位移**：`out(p) = src(p + D(p))`。所以要把內容往某方向推，
+就從被筆刷碰到的節點 **減去** 那個方向。
+
+- 筆刷落點用鐘形衰減 `(1 - d²/r²)²`，再乘上 `1 - freeze[i]`
+- 扭轉是把節點相對筆刷中心旋轉後的差值；縮攏／膨脹沿半徑方向推拉
+- 重建把位移乘上 `1 - w·amount` 逐步收斂回 0
+- 凍結遮色片是同一張網格上的另一個 `Float32Array`
+
+`warpImage(src, dst, mesh, scale)` 的 `scale` 表示「一個文件單位等於幾個影像像素」，
+所以同一張網格可以先驅動縮小的即時預覽，按下確定後再以 `scale = 1` 在原尺寸重跑一次，
+不會有兩套變形邏輯。
+
 ## 智慧型物件
 
 `core/smart.ts`。智慧型物件圖層 (`kind: 'smart'`) 持有：

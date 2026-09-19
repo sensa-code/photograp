@@ -6,10 +6,12 @@ import { compositeLayers } from '../core/compositor';
 import { rasterizePath } from '../core/selection';
 import { pathFromLoops, toPath2D, createPath, pathIsEmpty, anchorCount } from '../core/path';
 import { channelCoverage, createAlphaChannel } from '../core/channels';
+import { quickMaskCoverage } from '../core/quickmask';
 import { createSmartObject, renderSmartLayer, replaceSmartSource, smartFilterEntry } from '../core/smart';
 import { rgbCss } from '../core/color';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
 import { loadImageFile, pickFiles } from '../io/files';
+import { liquifyDialog } from './dialogs/liquify';
 import { cmd, type Cmd } from './command-types';
 import { el, on } from './dom';
 import {
@@ -46,9 +48,9 @@ function pathToCoverage(app: App): Uint8Array | null {
 
 function paintPath(app: App, mode: 'fill' | 'stroke'): void {
   const d = doc(app);
-  const layer = d?.activeLayer();
+  const target = d?.paintTarget();
   const path = d?.activePath();
-  if (!d || !path || !layer?.surface || layer.locked) {
+  if (!d || !path || !target) {
     app.toast('需要一個可編輯的點陣圖層與路徑', 'error');
     return;
   }
@@ -65,12 +67,12 @@ function paintPath(app: App, mode: 'fill' | 'stroke'): void {
     paint.ctx.lineJoin = 'round';
     paint.ctx.stroke(p2d);
   }
-  if (d.selection.active) {
+  if (target.clipToSelection && d.selection.active) {
     paint.ctx.globalCompositeOperation = 'destination-in';
     paint.ctx.drawImage(d.selection.toSurface().canvas, 0, 0);
   }
-  const target = d.mutableSurface(layer);
-  target.ctx.drawImage(paint.canvas, -layer.x, -layer.y);
+  const dest = d.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.drawImage(paint.canvas, -target.offX, -target.offY);
   d.commit(mode === 'fill' ? '填滿路徑' : '筆畫路徑');
   app.changed();
 }
@@ -309,7 +311,68 @@ async function smartTransformDialog(app: App): Promise<void> {
   app.changed();
 }
 
+async function quickMaskOptionsDialog(app: App): Promise<void> {
+  const d = doc(app);
+  if (!d) return;
+  if (!d.quickMask) { d.enterQuickMask(); }
+  const qm = d.quickMask!;
+  const before = { ...qm, color: { ...qm.color } };
+  const apply = (): void => { d.touch(); app.changed(); };
+  const body = formGrid([
+    ['顏色指示', selectControl(qm.showMaskedAreas ? 'masked' : 'selected', [
+      { value: 'masked', label: '受遮色片保護的區域' },
+      { value: 'selected', label: '選取的區域' },
+    ], (v) => { qm.showMaskedAreas = v === 'masked'; apply(); })],
+    ['顏色', colorChip(qm.color, (c) => { qm.color = c; apply(); })],
+    ['不透明度', sliderControl(qm.opacity * 100, 1, 100, 1, (v) => {
+      qm.opacity = v / 100; apply();
+    }, '%', 150)],
+  ]);
+  if (await openModal({ title: '快速遮色片選項', body }) === 'ok') {
+    d.commit('快速遮色片選項');
+  } else {
+    d.quickMask = { ...before, surface: qm.surface };
+    d.touch();
+  }
+  app.changed();
+}
+
 export const VECTOR_COMMANDS: Cmd[] = [
+  // ---- liquify ----
+  cmd('filter.liquify', '液化…', (a) => liquifyDialog(a), {
+    shortcut: 'Ctrl+Shift+X',
+    enabled: (a) => !!doc(a)?.paintTarget(),
+  }),
+
+  // ---- quick mask ----
+  cmd('quickmask.toggle', '以快速遮色片模式編輯', (a) => {
+    const d = doc(a);
+    if (!d) return;
+    if (d.quickMask) {
+      d.exitQuickMask();
+      d.commit('結束快速遮色片');
+      a.status('已將快速遮色片轉換為選取範圍');
+    } else {
+      d.enterQuickMask();
+      d.commit('進入快速遮色片');
+      a.status('快速遮色片：用黑色塗抹可遮蔽，白色塗抹可取消遮蔽');
+    }
+    a.changed();
+  }, { shortcut: 'Q', enabled: (a) => !!doc(a), checked: (a) => !!doc(a)?.quickMask }),
+  cmd('quickmask.options', '快速遮色片選項…', (a) => quickMaskOptionsDialog(a), {
+    enabled: (a) => !!doc(a),
+  }),
+  cmd('quickmask.toChannel', '將快速遮色片儲存為色版', (a) => {
+    const d = doc(a);
+    if (!d?.quickMask) { a.toast('請先進入快速遮色片模式', 'error'); return; }
+    const cov = quickMaskCoverage(d.quickMask.surface);
+    const ch = createAlphaChannel(`Alpha ${d.channels.length + 1}`, d.width, d.height, cov);
+    d.channels.push(ch);
+    d.commit('儲存快速遮色片');
+    a.toast(`已儲存為「${ch.name}」`, 'success');
+    a.changed();
+  }, { enabled: (a) => !!doc(a)?.quickMask }),
+
   // ---- paths ----
   cmd('path.new', '新增路徑', (a) => {
     const d = doc(a);

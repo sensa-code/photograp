@@ -1,4 +1,4 @@
-import type { PhotoDoc } from '../core/document';
+import type { PaintSlot, PhotoDoc } from '../core/document';
 import type { Layer } from '../core/types';
 import { cloneSurface, createSurface, type Surface } from '../core/surface';
 import type { RGB } from '../core/color';
@@ -99,19 +99,21 @@ export class Stroke {
 
   constructor(
     private doc: PhotoDoc,
-    private layer: Layer,
+    private layer: Layer | null,
     target: Surface,
-    private isMask: boolean,
+    private slot: PaintSlot,
     private settings: BrushSettings,
     private mode: StrokeMode = 'paint',
   ) {
     this.base = cloneSurface(target);
     this.scratch = createSurface(target.w, target.h);
     this.preview = cloneSurface(target);
-    this.offX = isMask ? 0 : layer.x;
-    this.offY = isMask ? 0 : layer.y;
-    this.selection = doc.selection.active ? doc.selection.toSurface() : null;
-    doc.livePreview = { layerId: layer.id, surface: this.preview, isMask };
+    // Masks and Quick Mask live in document space; layer pixels are offset.
+    this.offX = slot === 'pixels' && layer ? layer.x : 0;
+    this.offY = slot === 'pixels' && layer ? layer.y : 0;
+    // Quick Mask edits the selection itself, so it is never clipped by one.
+    this.selection = slot !== 'quickmask' && doc.selection.active ? doc.selection.toSurface() : null;
+    doc.setPaintPreview(layer, slot, this.preview);
   }
 
   private markDirty(x: number, y: number, r: number): void {
@@ -234,18 +236,16 @@ export class Stroke {
   }
 
   abort(): void {
-    this.doc.livePreview = null;
+    this.doc.clearPaintPreview();
     this.doc.touch();
   }
 
-  /** Bake the stroke into the layer and push a history step. */
+  /** Bake the stroke into the target surface and push a history step. */
   commit(label: string): boolean {
-    this.doc.livePreview = null;
+    this.doc.clearPaintPreview();
     if (!this.bounds) { this.doc.touch(); return false; }
     this.flush();
-    const target = this.isMask
-      ? this.doc.mutableMask(this.layer)
-      : this.doc.mutableSurface(this.layer);
+    const target = this.doc.mutablePaintSurface(this.layer, this.slot);
     target.ctx.save();
     target.ctx.globalAlpha = clamp(this.settings.opacity, 0, 1);
     target.ctx.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : 'source-over';

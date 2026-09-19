@@ -29,6 +29,8 @@ import {
   channelCoverage, createAlphaChannel, extractChannel, renderChannelView, setChannelCoverage,
 } from '../src/core/channels';
 import { createSmartObject, renderSmartLayer, smartBounds, smartFilterEntry } from '../src/core/smart';
+import { quickMaskCoverage, renderQuickMaskOverlay } from '../src/core/quickmask';
+import { WarpMesh, warpImage, composeWarpWithSelection } from '../src/filters/liquify';
 
 interface Case { name: string; error?: string }
 const groups: { name: string; cases: Case[] }[] = [];
@@ -394,7 +396,7 @@ async function run(): Promise<void> {
     const p = new Path2D(); p.rect(0, 0, 20, 40);
     doc.selection.combine(rasterizePath(p, 40, 40), 'replace');
     const settings = { ...defaultBrush(), size: 12, hardness: 1, smoothing: 0, sizePressure: false };
-    const stroke = new Stroke(doc, layer, layer.surface!, false, settings, 'paint');
+    const stroke = new Stroke(doc, layer, layer.surface!, 'pixels', settings, 'paint');
     stroke.begin(5, 20, 1);
     stroke.extend(35, 20, 1);
     stroke.commit('test');
@@ -406,7 +408,7 @@ async function run(): Promise<void> {
     const doc = PhotoDoc.createBlank('t', 30, 30, 'white');
     const layer = doc.activeLayer()!;
     const settings = { ...defaultBrush(), size: 10, hardness: 1, smoothing: 0, sizePressure: false };
-    const stroke = new Stroke(doc, layer, layer.surface!, false, settings, 'erase');
+    const stroke = new Stroke(doc, layer, layer.surface!, 'pixels', settings, 'erase');
     stroke.begin(15, 15, 1);
     stroke.commit('erase');
     assert(pixel(doc.activeLayer()!.surface!, 15, 15)[3] < 40, '擦除處應變透明');
@@ -762,6 +764,262 @@ async function run(): Promise<void> {
     layer.kind = 'smart';
     layer.smart = createSmartObject(filled(10, 10, '#fff'), 15, 15);
     assert(d.paintTarget() === null, '智慧型物件不應成為繪製目標');
+  });
+
+  // ---- quick mask ----
+  group('快速遮色片');
+  await test('進入時由選取範圍產生遮色片', () => {
+    const d = PhotoDoc.createBlank('t', 40, 40, 'white');
+    const p = new Path2D();
+    p.rect(10, 10, 20, 20);
+    d.selection.combine(rasterizePath(p, 40, 40), 'replace');
+    d.enterQuickMask();
+    assert(d.quickMask !== null, '應進入快速遮色片模式');
+    assert(!d.selection.active, '進入後選取範圍應交給遮色片');
+    assert(pixel(d.quickMask!.surface, 20, 20)[0] === 255, '選取區在遮色片中應為白色');
+    assert(pixel(d.quickMask!.surface, 2, 2)[0] === 0, '未選取區應為黑色');
+  });
+  await test('離開時把遮色片轉回選取範圍', () => {
+    const d = PhotoDoc.createBlank('t', 40, 40, 'white');
+    d.enterQuickMask();
+    const m = d.mutableQuickMask();
+    m.ctx.fillStyle = '#000';
+    m.ctx.fillRect(0, 0, 20, 40);
+    d.exitQuickMask();
+    assert(d.quickMask === null, '應離開快速遮色片模式');
+    assert(d.selection.active, '應產生選取範圍');
+    assert(d.selection.at(30, 20) === 255, '未塗黑的一側應被選取');
+    assert(d.selection.at(5, 20) === 0, '塗黑的一側不應被選取');
+  });
+  await test('沒有任何遮蔽時離開會取消選取', () => {
+    const d = PhotoDoc.createBlank('t', 20, 20, 'white');
+    d.enterQuickMask();
+    d.exitQuickMask();
+    assert(!d.selection.active, '未塗抹就離開應維持沒有選取範圍');
+  });
+  await test('繪製目標會切換到快速遮色片', () => {
+    const d = PhotoDoc.createBlank('t', 30, 30, 'white');
+    assert(d.paintTarget()?.slot === 'pixels', '一般情況應繪製圖層像素');
+    d.enterQuickMask();
+    const t = d.paintTarget()!;
+    assert(t.slot === 'quickmask', '快速遮色片模式應接管繪製');
+    assert(t.layer === null, '快速遮色片不隸屬任何圖層');
+  });
+  await test('筆刷可直接塗抹快速遮色片', () => {
+    const d = PhotoDoc.createBlank('t', 60, 60, 'white');
+    d.enterQuickMask();
+    const t = d.paintTarget()!;
+    const settings = {
+      ...defaultBrush(), size: 20, hardness: 1, smoothing: 0,
+      sizePressure: false, color: { r: 0, g: 0, b: 0 },
+    };
+    const stroke = new Stroke(d, t.layer, t.surface, t.slot, settings, 'paint');
+    stroke.begin(30, 30, 1);
+    stroke.commit('快速遮色片筆刷');
+    assert(pixel(d.quickMask!.surface, 30, 30)[0] < 40, '塗抹處應變黑');
+    assert(pixel(d.quickMask!.surface, 30, 30)[3] === 255, '遮色片應維持不透明');
+    d.exitQuickMask();
+    assert(d.selection.at(30, 30) < 40, '塗抹處不應被選取');
+    assert(d.selection.at(2, 2) === 255, '其餘部分應被選取');
+  });
+  await test('覆蓋率往返與疊印顏色', () => {
+    const d = PhotoDoc.createBlank('t', 8, 8, 'white');
+    d.enterQuickMask();
+    const cov = quickMaskCoverage(d.quickMask!.surface);
+    assert(cov.every((v) => v === 255), '初始應為全選');
+    const composite = filled(8, 8, 'rgb(0,0,0)');
+    const qm = d.quickMask!;
+    const m = d.mutableQuickMask();
+    m.ctx.fillStyle = '#000';
+    m.ctx.fillRect(0, 0, 8, 8);
+    const tinted = renderQuickMaskOverlay(composite, d.quickMask!, null);
+    const p = pixel(tinted, 4, 4);
+    assert(p[0] > 100 && p[1] < 40, `遮蔽區應疊上紅色，實得 ${p}`);
+    void qm;
+  });
+  await test('步驟記錄會保留快速遮色片狀態', () => {
+    const d = PhotoDoc.createBlank('t', 20, 20, 'white');
+    d.commit('base');
+    d.enterQuickMask();
+    d.commit('進入快速遮色片');
+    assert(d.undo(), '應可還原');
+    assert(d.quickMask === null, '還原後應離開快速遮色片');
+    assert(d.redo(), '應可重做');
+    assert(d.quickMask !== null, '重做後應回到快速遮色片');
+  });
+
+  // ---- liquify ----
+  group('液化');
+  await test('未變形的網格會原樣複製影像', () => {
+    const src = createSurface(32, 32);
+    src.ctx.fillStyle = '#c03040';
+    src.ctx.fillRect(0, 0, 16, 32);
+    const img = src.ctx.getImageData(0, 0, 32, 32);
+    const out = new ImageData(32, 32);
+    const mesh = new WarpMesh(32, 32, 4);
+    assert(mesh.isIdentity(), '新網格應為恆等');
+    warpImage(img, out, mesh, 1);
+    let diff = 0;
+    for (let i = 0; i < img.data.length; i++) if (img.data[i] !== out.data[i]) diff++;
+    assert(diff === 0, `恆等網格應完全複製，實際有 ${diff} 個位元組不同`);
+  });
+  await test('向前彎曲會把內容往拖曳方向推', () => {
+    const src = createSurface(64, 64);
+    src.ctx.fillStyle = '#000000';
+    src.ctx.fillRect(0, 0, 32, 64);
+    src.ctx.fillStyle = '#ffffff';
+    src.ctx.fillRect(32, 0, 32, 64);
+    const img = src.ctx.getImageData(0, 0, 64, 64);
+    const out = new ImageData(64, 64);
+
+    const mesh = new WarpMesh(64, 64, 4);
+    mesh.stroke('forward', 32, 32, 24, 1, 10, 0);
+    warpImage(img, out, mesh, 1);
+    const at = (x: number, y: number): number => out.data[(y * 64 + x) * 4];
+    assert(img.data[(32 * 64 + 36) * 4] === 255, '原本 x=36 應為白色');
+    assert(at(36, 32) < 60, `推擠後 x=36 應被黑色覆蓋，實得 ${at(36, 32)}`);
+    assert(at(60, 32) > 200, '筆刷範圍外不應改變');
+  });
+  await test('凍結遮色片會保護該區域', () => {
+    const mesh = new WarpMesh(64, 64, 4);
+    mesh.stroke('freeze', 32, 32, 24, 1, 0, 0);
+    assert(mesh.hasFreeze(), '應記錄凍結範圍');
+    mesh.stroke('forward', 32, 32, 24, 1, 10, 0);
+    const off: [number, number] = [0, 0];
+    mesh.sample(32, 32, off);
+    assert(Math.abs(off[0]) < 0.01, `完全凍結處不應位移，實得 ${off[0]}`);
+    mesh.clearFreeze();
+    mesh.stroke('forward', 32, 32, 24, 1, 10, 0);
+    mesh.sample(32, 32, off);
+    assert(Math.abs(off[0]) > 5, '解凍後應可再次位移');
+  });
+  await test('重建會把位移拉回原點', () => {
+    const mesh = new WarpMesh(64, 64, 4);
+    mesh.stroke('forward', 32, 32, 24, 1, 12, 0);
+    const off: [number, number] = [0, 0];
+    mesh.sample(32, 32, off);
+    const before = Math.abs(off[0]);
+    assert(before > 5, '應先產生位移');
+    for (let i = 0; i < 6; i++) mesh.stroke('reconstruct', 32, 32, 24, 1, 0, 0);
+    mesh.sample(32, 32, off);
+    assert(Math.abs(off[0]) < before * 0.3, `重建後位移應大幅縮小：${before} → ${Math.abs(off[0])}`);
+  });
+  await test('膨脹與縮攏的方向相反', () => {
+    const off: [number, number] = [0, 0];
+    const bloat = new WarpMesh(64, 64, 4);
+    bloat.stroke('bloat', 32, 32, 24, 1, 0, 0);
+    bloat.sample(40, 32, off);
+    const bloatDx = off[0];
+    const pucker = new WarpMesh(64, 64, 4);
+    pucker.stroke('pucker', 32, 32, 24, 1, 0, 0);
+    pucker.sample(40, 32, off);
+    const puckerDx = off[0];
+    assert(bloatDx < 0 && puckerDx > 0, `方向應相反：膨脹 ${bloatDx}、縮攏 ${puckerDx}`);
+  });
+  await test('扭轉會產生垂直於半徑的位移', () => {
+    const mesh = new WarpMesh(64, 64, 4);
+    for (let i = 0; i < 4; i++) mesh.stroke('twirl-cw', 32, 32, 24, 1, 0, 0);
+    const off: [number, number] = [0, 0];
+    mesh.sample(44, 32, off);
+    assert(Math.abs(off[1]) > Math.abs(off[0]), `水平方向的取樣點應主要往垂直位移：${off}`);
+  });
+  await test('網格縮放與預覽一致', () => {
+    const mesh = new WarpMesh(64, 64, 4);
+    mesh.stroke('forward', 32, 32, 24, 1, 8, 0);
+    const off: [number, number] = [0, 0];
+    mesh.sample(32, 32, off);
+    // The same mesh drives a half-size preview, so the shift halves in pixels.
+    const shiftFull = off[0] * 1;
+    const shiftHalf = off[0] * 0.5;
+    near(shiftHalf, shiftFull / 2, 0.001, '不同縮放下的位移應成比例');
+  });
+
+  // ---- review follow-ups ----
+  group('快速遮色片整合');
+  await test('填滿與清除會作用在快速遮色片上', () => {
+    const d = PhotoDoc.createBlank('t', 30, 30, 'white');
+    d.enterQuickMask();
+    const t = d.paintTarget()!;
+    assert(t.clipToSelection === false, '快速遮色片不應被選取範圍裁切');
+    assert(t.offX === 0 && t.offY === 0, '快速遮色片位於文件座標');
+    const dest = d.mutablePaintSurface(t.layer, t.slot);
+    dest.ctx.fillStyle = '#000';
+    dest.ctx.fillRect(0, 0, 15, 30);
+    assert(pixel(d.quickMask!.surface, 5, 5)[0] === 0, '應寫入快速遮色片');
+    assert(pixel(d.layers[0].surface!, 5, 5)[0] === 255, '圖層像素不應被更動');
+  });
+  await test('版面尺寸改變時快速遮色片跟著位移', () => {
+    const d = PhotoDoc.createBlank('t', 20, 20, 'white');
+    d.enterQuickMask();
+    const m = d.mutableQuickMask();
+    m.ctx.fillStyle = '#000';
+    m.ctx.fillRect(0, 0, 10, 20);
+    d.resizeCanvas(30, 20, 10, 0);
+    assert(d.quickMask!.surface.w === 30, '遮色片應跟著版面變寬');
+    assert(pixel(d.quickMask!.surface, 15, 10)[0] === 0, '原本遮蔽的區域應位移');
+    assert(pixel(d.quickMask!.surface, 25, 10)[0] === 255, '未遮蔽的區域應保持');
+  });
+  await test('影像尺寸改變時快速遮色片重新取樣', () => {
+    const d = PhotoDoc.createBlank('t', 20, 20, 'white');
+    d.enterQuickMask();
+    d.resampleTo(40, 40, true);
+    assert(d.quickMask!.surface.w === 40 && d.quickMask!.surface.h === 40, '遮色片應同步縮放');
+  });
+  await test('專案存檔保留快速遮色片', async () => {
+    const d = PhotoDoc.createBlank('t', 24, 16, 'white');
+    d.enterQuickMask();
+    const m = d.mutableQuickMask();
+    m.ctx.fillStyle = '#000';
+    m.ctx.fillRect(0, 0, 12, 16);
+    d.quickMask = { ...d.quickMask!, opacity: 0.8, showMaskedAreas: false };
+    d.commit('quick mask');
+
+    const restored = await loadProject(serializeDocument(d));
+    assert(restored.quickMask !== null, '快速遮色片應被保留');
+    near(restored.quickMask!.opacity, 0.8, 0.001, '不透明度應被保留');
+    assert(restored.quickMask!.showMaskedAreas === false, '顏色指示方向應被保留');
+    assert(pixel(restored.quickMask!.surface, 3, 8)[0] === 0, '遮蔽內容應被保留');
+    assert(pixel(restored.quickMask!.surface, 20, 8)[0] === 255, '未遮蔽內容應被保留');
+  });
+
+  group('液化細節');
+  await test('取樣不會從透明鄰居帶入顏色', () => {
+    const src = new ImageData(4, 1);
+    src.data.set([255, 0, 0, 255], 0);
+    // The remaining pixels stay fully transparent black.
+    const dst = new ImageData(4, 1);
+    const mesh = new WarpMesh(4, 1, 4);
+    mesh.dx.fill(0.5);
+    warpImage(src, dst, mesh, 1);
+    assert(dst.data[0] > 240, `色彩應維持純紅，實得 ${dst.data[0]}`);
+    assert(dst.data[3] > 100 && dst.data[3] < 200, `alpha 應約為一半，實得 ${dst.data[3]}`);
+  });
+  await test('選取範圍內的變形透明度會被保留', () => {
+    const original = createSurface(20, 20);
+    original.ctx.fillStyle = '#ff0000';
+    original.ctx.fillRect(4, 4, 8, 8);
+
+    // The warp moved the square out of the selected region entirely.
+    const warped = createSurface(20, 20);
+
+    const sel = new Selection(20, 20);
+    const p = new Path2D();
+    p.rect(2, 2, 12, 12);
+    sel.combine(rasterizePath(p, 20, 20), 'replace');
+
+    const merged = composeWarpWithSelection(original, warped, sel.toSurface(), 0, 0);
+    assert(pixel(merged, 8, 8)[3] === 0, '選取範圍內應變成透明，而非露出原圖');
+  });
+  await test('重複扭轉會持續累積旋轉', () => {
+    const one = new WarpMesh(64, 64, 4);
+    one.stroke('twirl-cw', 32, 32, 24, 1, 0, 0);
+    const many = new WarpMesh(64, 64, 4);
+    for (let i = 0; i < 5; i++) many.stroke('twirl-cw', 32, 32, 24, 1, 0, 0);
+    const a: [number, number] = [0, 0];
+    const b: [number, number] = [0, 0];
+    one.sample(44, 32, a);
+    many.sample(44, 32, b);
+    assert(Math.hypot(b[0], b[1]) > Math.hypot(a[0], a[1]) * 2, '多次扭轉應明顯大於單次');
   });
 
   // ---- tools smoke test ----

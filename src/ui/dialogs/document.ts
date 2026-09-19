@@ -204,9 +204,9 @@ export async function exportDialog(app: App): Promise<void> {
 
 export async function fillDialog(app: App): Promise<void> {
   const doc = app.activeDoc();
-  const layer = doc?.activeLayer();
-  if (!doc || !layer || !layer.surface || layer.locked) {
-    app?.toast('請先選擇可編輯的點陣圖層', 'error');
+  const target = doc?.paintTarget();
+  if (!doc || !target) {
+    app.toast('請先選擇可編輯的點陣圖層', 'error');
     return;
   }
   let source = 'foreground';
@@ -238,24 +238,24 @@ export async function fillDialog(app: App): Promise<void> {
   const paint = createSurface(doc.width, doc.height);
   paint.ctx.fillStyle = rgbCss(color);
   paint.ctx.fillRect(0, 0, paint.w, paint.h);
-  if (doc.selection.active) {
+  if (target.clipToSelection && doc.selection.active) {
     paint.ctx.globalCompositeOperation = 'destination-in';
     paint.ctx.drawImage(doc.selection.toSurface().canvas, 0, 0);
   }
-  const target = doc.mutableSurface(layer);
-  target.ctx.save();
-  target.ctx.globalAlpha = opacity / 100;
-  target.ctx.drawImage(paint.canvas, -layer.x, -layer.y);
-  target.ctx.restore();
+  const dest = doc.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.save();
+  dest.ctx.globalAlpha = opacity / 100;
+  dest.ctx.drawImage(paint.canvas, -target.offX, -target.offY);
+  dest.ctx.restore();
   doc.commit('填滿');
   app.changed();
 }
 
 export async function strokeDialog(app: App): Promise<void> {
   const doc = app.activeDoc();
-  const layer = doc?.activeLayer();
-  if (!doc || !layer || !layer.surface || layer.locked) {
-    app?.toast('請先選擇可編輯的點陣圖層', 'error');
+  const target = doc?.paintTarget();
+  if (!doc || !target) {
+    app.toast('請先選擇可編輯的點陣圖層', 'error');
     return;
   }
   if (!doc.selection.active) {
@@ -308,11 +308,11 @@ export async function strokeDialog(app: App): Promise<void> {
   }
   paint.ctx.putImageData(img, 0, 0);
 
-  const target = doc.mutableSurface(layer);
-  target.ctx.save();
-  target.ctx.globalAlpha = opacity / 100;
-  target.ctx.drawImage(paint.canvas, -layer.x, -layer.y);
-  target.ctx.restore();
+  const dest = doc.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.save();
+  dest.ctx.globalAlpha = opacity / 100;
+  dest.ctx.drawImage(paint.canvas, -target.offX, -target.offY);
+  dest.ctx.restore();
   doc.commit('筆畫');
   app.changed();
 }
@@ -482,6 +482,8 @@ const SHORTCUTS: [string, string][] = [
   ['Ctrl+G', '群組圖層'],
   ['Ctrl+ +/- / Ctrl+0 / Ctrl+1', '放大、縮小、顯示全頁、100%'],
   ['[ / ]', '縮小 / 放大筆刷'],
+  ['Q', '切換快速遮色片模式'],
+  ['Ctrl+Shift+X', '液化'],
   ['X / D', '交換前景背景色 / 重設為黑白'],
   ['Alt+Backspace / Ctrl+Backspace', '填入前景色 / 背景色'],
   ['Delete', '刪除選取範圍內容'],

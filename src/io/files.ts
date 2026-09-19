@@ -6,10 +6,11 @@ import { Selection } from '../core/selection';
 import { clonePath, type VectorPath } from '../core/path';
 import type { AlphaChannel } from '../core/channels';
 import { renderSmartLayer } from '../core/smart';
+import type { QuickMask } from '../core/quickmask';
 
 export const PROJECT_EXT = '.pgraph';
 const PROJECT_MAGIC = 'photograp-project';
-const PROJECT_VERSION = 2;
+const PROJECT_VERSION = 3;
 
 export interface OpenedImage { name: string; image: HTMLImageElement }
 
@@ -117,6 +118,13 @@ interface SerializedSmart {
   filters: SmartFilterEntry[];
 }
 
+interface SerializedQuickMask {
+  surface: string;
+  color: { r: number; g: number; b: number };
+  opacity: number;
+  showMaskedAreas: boolean;
+}
+
 interface SerializedChannel {
   id: string;
   name: string;
@@ -139,6 +147,7 @@ interface SerializedDoc {
   paths?: VectorPath[];
   activePathId?: string | null;
   channels?: SerializedChannel[];
+  quickMask?: SerializedQuickMask | null;
 }
 
 const encode = (s: Surface | null): string | null => (s ? s.canvas.toDataURL('image/png') : null);
@@ -202,6 +211,14 @@ export function serializeDocument(doc: PhotoDoc): string {
       opacity: c.opacity,
       visible: c.visible,
     })),
+    quickMask: doc.quickMask
+      ? {
+        surface: doc.quickMask.surface.canvas.toDataURL('image/png'),
+        color: { ...doc.quickMask.color },
+        opacity: doc.quickMask.opacity,
+        showMaskedAreas: doc.quickMask.showMaskedAreas,
+      }
+      : null,
   };
   return JSON.stringify(out);
 }
@@ -278,6 +295,18 @@ export async function loadProject(text: string): Promise<PhotoDoc> {
     surface.ctx.drawImage(img, 0, 0);
     return { id: c.id, name: c.name, surface, color: c.color, opacity: c.opacity, visible: c.visible };
   }));
+  if (data.quickMask) {
+    const img = await loadImageSrc(data.quickMask.surface);
+    const surface = createSurface(data.width, data.height);
+    surface.ctx.drawImage(img, 0, 0);
+    const qm: QuickMask = {
+      surface,
+      color: data.quickMask.color,
+      opacity: data.quickMask.opacity,
+      showMaskedAreas: data.quickMask.showMaskedAreas,
+    };
+    doc.quickMask = qm;
+  }
   // Smart caches are not stored; rebuild them from the embedded sources.
   for (const l of doc.allLayers()) {
     if (l.kind === 'smart' && l.smart) renderSmartLayer(l, doc.width, doc.height);

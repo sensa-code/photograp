@@ -1,5 +1,5 @@
 import type { App } from '../../core/app';
-import type { PhotoDoc } from '../../core/document';
+import type { PaintSlot, PhotoDoc } from '../../core/document';
 import type { Layer, AdjustmentSpec, CurveChannel } from '../../core/types';
 import { cloneSurface, createSurface, type Surface } from '../../core/surface';
 import { clamp, type Rect } from '../../core/geometry';
@@ -29,14 +29,15 @@ export class PixelOpSession {
   private constructor(
     private app: App,
     private doc: PhotoDoc,
-    private layer: Layer,
-    private isMask: boolean,
+    private layer: Layer | null,
+    private slot: PaintSlot,
     target: Surface,
   ) {
-    this.offX = isMask ? 0 : layer.x;
-    this.offY = isMask ? 0 : layer.y;
+    this.offX = slot === 'pixels' && layer ? layer.x : 0;
+    this.offY = slot === 'pixels' && layer ? layer.y : 0;
 
-    const b = doc.selection.bounds();
+    // Quick Mask edits the selection itself, so it is never cropped by it.
+    const b = slot === 'quickmask' ? null : doc.selection.bounds();
     let region: Rect = { x: 0, y: 0, w: target.w, h: target.h };
     if (b) {
       const x = clamp(Math.floor(b.x - this.offX), 0, target.w);
@@ -49,23 +50,18 @@ export class PixelOpSession {
     this.base = target;
     this.source = target.ctx.getImageData(region.x, region.y, region.w, region.h);
     this.preview = cloneSurface(target);
-    this.selection = doc.selection.active ? doc.selection.toSurface() : null;
-    doc.livePreview = { layerId: layer.id, surface: this.preview, isMask };
+    this.selection = slot !== 'quickmask' && doc.selection.active ? doc.selection.toSurface() : null;
+    doc.setPaintPreview(layer, slot, this.preview);
   }
 
   static begin(app: App, doc: PhotoDoc): PixelOpSession | null {
-    const layer = doc.activeLayer();
-    if (!layer || layer.locked) {
-      app.toast('請先選擇一個未鎖定的圖層', 'error');
-      return null;
-    }
-    const isMask = doc.editingMask && !!layer.mask;
-    const target = isMask ? layer.mask! : layer.surface;
+    // Quick Mask, layer mask and layer pixels all route through paintTarget.
+    const target = doc.paintTarget();
     if (!target) {
-      app.toast('此圖層沒有可編輯的像素', 'error');
+      app.toast('此圖層沒有可編輯的像素（已鎖定或為智慧型物件）', 'error');
       return null;
     }
-    return new PixelOpSession(app, doc, layer, isMask, target);
+    return new PixelOpSession(app, doc, target.layer, target.slot, target.surface);
   }
 
   histogram(): HistogramData { return computeHistogram(this.source); }
@@ -102,10 +98,8 @@ export class PixelOpSession {
   }
 
   commit(label: string): void {
-    this.doc.livePreview = null;
-    const target = this.isMask
-      ? this.doc.mutableMask(this.layer)
-      : this.doc.mutableSurface(this.layer);
+    this.doc.clearPaintPreview();
+    const target = this.doc.mutablePaintSurface(this.layer, this.slot);
     target.ctx.clearRect(0, 0, target.w, target.h);
     target.ctx.drawImage(this.preview.canvas, 0, 0);
     this.doc.commit(label);
@@ -113,7 +107,7 @@ export class PixelOpSession {
   }
 
   cancel(): void {
-    this.doc.livePreview = null;
+    this.doc.clearPaintPreview();
     this.doc.touch();
     this.app.changed();
   }

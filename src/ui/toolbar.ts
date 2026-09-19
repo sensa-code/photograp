@@ -4,6 +4,7 @@ import { el, on } from './dom';
 import { icon } from './icons';
 import { colorPickerDialog } from './modal';
 import { rgbCss } from '../core/color';
+import { runCommand } from './commands';
 
 export class ToolBar {
   readonly root: HTMLElement;
@@ -12,12 +13,15 @@ export class ToolBar {
   private buttons: HTMLButtonElement[] = [];
   private fgSwatch!: HTMLElement;
   private bgSwatch!: HTMLElement;
+  private quickMaskBtn!: HTMLButtonElement;
 
   constructor(private app: App) {
     this.root = el('div', { class: 'toolbar' });
     this.build();
     app.events.on('tool-changed', () => this.refresh());
     app.events.on('color-changed', () => this.paintColors());
+    app.events.on('doc-changed', () => this.refreshQuickMask());
+    app.events.on('docs-changed', () => this.refreshQuickMask());
   }
 
   private build(): void {
@@ -93,8 +97,26 @@ export class ToolBar {
     on(reset, 'click', () => this.app.resetColors());
     this.root.append(el('div', { style: 'display:flex;gap:2px;margin-top:4px' }, swap, reset));
 
+    // Quick Mask toggle, in the same place Photoshop puts it.
+    this.quickMaskBtn = el('button', {
+      class: 'tool-btn', style: 'margin-top:8px',
+      html: icon('mask', 18), title: '以快速遮色片模式編輯 (Q)',
+    }) as HTMLButtonElement;
+    on(this.quickMaskBtn, 'click', () => runCommand(this.app, 'quickmask.toggle'));
+    on(this.quickMaskBtn, 'contextmenu', (ev) => {
+      ev.preventDefault();
+      runCommand(this.app, 'quickmask.options');
+    });
+    this.root.append(this.quickMaskBtn);
+
     this.paintColors();
     this.refresh();
+    this.refreshQuickMask();
+  }
+
+  private refreshQuickMask(): void {
+    const on = !!this.app.activeDoc()?.quickMask;
+    this.quickMaskBtn.classList.toggle('active', on);
   }
 
   private paintColors(): void {

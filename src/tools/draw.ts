@@ -1,6 +1,7 @@
 import type { App } from '../core/app';
 import type { PhotoDoc } from '../core/document';
 import type { GradientStop, Layer } from '../core/types';
+import type { PaintTarget } from '../core/document';
 import { createSurface, type Surface } from '../core/surface';
 import { clamp, normalizeRect } from '../core/geometry';
 import { rgbCss, type RGB } from '../core/color';
@@ -9,15 +10,15 @@ import { defaultTextStyle, renderTextLayer } from '../core/text';
 import { floodSelect } from './select';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
-/** Fill the layer through an 8-bit coverage mask, honouring the selection. */
+/** Fill the current paint target through an 8-bit coverage mask. */
 function fillThroughCoverage(
-  doc: PhotoDoc, layer: Layer, cov: Uint8Array, style: string | CanvasGradient,
+  doc: PhotoDoc, target: PaintTarget, cov: Uint8Array, style: string | CanvasGradient,
   opacity: number, label: string,
 ): void {
   const covSurf = createSurface(doc.width, doc.height);
   const img = covSurf.ctx.createImageData(doc.width, doc.height);
   const d = img.data;
-  const sel = doc.selection.mask;
+  const sel = target.clipToSelection ? doc.selection.mask : null;
   for (let i = 0, p = 0; i < cov.length; i++, p += 4) {
     d[p] = 255; d[p + 1] = 255; d[p + 2] = 255;
     d[p + 3] = sel ? (cov[i] * sel[i]) / 255 : cov[i];
@@ -30,11 +31,11 @@ function fillThroughCoverage(
   paint.ctx.globalCompositeOperation = 'destination-in';
   paint.ctx.drawImage(covSurf.canvas, 0, 0);
 
-  const target = doc.mutableSurface(layer);
-  target.ctx.save();
-  target.ctx.globalAlpha = clamp(opacity, 0, 1);
-  target.ctx.drawImage(paint.canvas, -layer.x, -layer.y);
-  target.ctx.restore();
+  const dest = doc.mutablePaintSurface(target.layer, target.slot);
+  dest.ctx.save();
+  dest.ctx.globalAlpha = clamp(opacity, 0, 1);
+  dest.ctx.drawImage(paint.canvas, -target.offX, -target.offY);
+  dest.ctx.restore();
   doc.commit(label);
 }
 
@@ -61,8 +62,8 @@ export class BucketTool implements Tool {
   ];
 
   down(e: ToolPointer): void {
-    const layer = e.doc.activeLayer();
-    if (!layer || layer.locked || !layer.surface) {
+    const target = e.doc.paintTarget();
+    if (!target) {
       e.app.toast('此圖層無法填色', 'error');
       return;
     }
@@ -70,10 +71,10 @@ export class BucketTool implements Tool {
     if (x < 0 || y < 0 || x >= e.doc.width || y >= e.doc.height) return;
 
     const o = e.app.toolOptions[this.id] ?? {};
-    const sampleAll = Boolean(o.sampleAll);
-    const src = sampleAll ? e.doc.composite() : layer.surface;
-    const ox = sampleAll ? 0 : layer.x;
-    const oy = sampleAll ? 0 : layer.y;
+    const sampleAll = Boolean(o.sampleAll) && target.slot === 'pixels';
+    const src = sampleAll ? e.doc.composite() : target.surface;
+    const ox = sampleAll ? 0 : target.offX;
+    const oy = sampleAll ? 0 : target.offY;
     const lx = x - ox, ly = y - oy;
     if (lx < 0 || ly < 0 || lx >= src.w || ly >= src.h) return;
 
@@ -100,7 +101,7 @@ export class BucketTool implements Tool {
 
     const color = o.fillWith === 'background' ? e.app.background : e.app.foreground;
     fillThroughCoverage(
-      e.doc, layer, cov, rgbCss(color), Number(o.opacity ?? 100) / 100, '油漆桶填色',
+      e.doc, target, cov, rgbCss(color), Number(o.opacity ?? 100) / 100, '油漆桶填色',
     );
     e.app.changed();
   }
@@ -304,21 +305,21 @@ export class GradientTool implements Tool {
   private end = { x: 0, y: 0 };
   private preview: Surface | null = null;
   private baseSurface: Surface | null = null;
-  private layer: Layer | null = null;
+  private target: PaintTarget | null = null;
 
   down(e: ToolPointer): void {
-    const layer = e.doc.activeLayer();
-    if (!layer || layer.locked || !layer.surface) {
+    const target = e.doc.paintTarget();
+    if (!target) {
       e.app.toast('此圖層無法填入漸層', 'error');
       return;
     }
-    this.layer = layer;
-    this.baseSurface = layer.surface;
-    this.preview = createSurface(layer.surface.w, layer.surface.h);
+    this.target = target;
+    this.baseSurface = target.surface;
+    this.preview = createSurface(target.surface.w, target.surface.h);
     this.dragging = true;
     this.start = { x: e.x, y: e.y };
     this.end = { x: e.x, y: e.y };
-    e.doc.livePreview = { layerId: layer.id, surface: this.preview, isMask: false };
+    e.doc.setPaintPreview(target.layer, target.slot, this.preview);
   }
 
   private paint(e: ToolPointer, target: Surface): void {
@@ -338,7 +339,7 @@ export class GradientTool implements Tool {
       this.start.x, this.start.y, ex, ey,
       stops, Boolean(o.reverse), Boolean(o.dither),
     );
-    if (e.doc.selection.active) {
+    if (e.doc.selection.active && this.target?.clipToSelection !== false) {
       grad.ctx.globalCompositeOperation = 'destination-in';
       grad.ctx.drawImage(e.doc.selection.toSurface().canvas, 0, 0);
     }
@@ -346,7 +347,7 @@ export class GradientTool implements Tool {
     if (this.baseSurface) target.ctx.drawImage(this.baseSurface.canvas, 0, 0);
     target.ctx.save();
     target.ctx.globalAlpha = Number(o.opacity ?? 100) / 100;
-    target.ctx.drawImage(grad.canvas, -(this.layer?.x ?? 0), -(this.layer?.y ?? 0));
+    target.ctx.drawImage(grad.canvas, -(this.target?.offX ?? 0), -(this.target?.offY ?? 0));
     target.ctx.restore();
   }
 
@@ -358,19 +359,19 @@ export class GradientTool implements Tool {
   }
 
   up(e: ToolPointer): void {
-    if (!this.dragging || !this.layer) return;
+    if (!this.dragging || !this.target) return;
     this.dragging = false;
-    e.doc.livePreview = null;
+    e.doc.clearPaintPreview();
     const moved = Math.hypot(this.end.x - this.start.x, this.end.y - this.start.y) > 1;
     if (moved) {
-      const target = e.doc.mutableSurface(this.layer);
-      this.paint(e, target);
+      const dest = e.doc.mutablePaintSurface(this.target.layer, this.target.slot);
+      this.paint(e, dest);
       e.doc.commit('漸層填色');
     } else {
       e.doc.touch();
     }
     this.preview = this.baseSurface = null;
-    this.layer = null;
+    this.target = null;
     e.app.changed();
   }
 
@@ -389,10 +390,10 @@ export class GradientTool implements Tool {
 
   cancel(app: App): void {
     const doc = app.activeDoc();
-    if (doc) { doc.livePreview = null; doc.touch(); }
+    if (doc) { doc.clearPaintPreview(); doc.touch(); }
     this.dragging = false;
     this.preview = this.baseSurface = null;
-    this.layer = null;
+    this.target = null;
     app.changed();
   }
 }
@@ -491,22 +492,31 @@ export class ShapeTool implements Tool {
   private end = { x: 0, y: 0 };
   private preview: Surface | null = null;
   private baseSurface: Surface | null = null;
-  private layer: Layer | null = null;
+  private target: PaintTarget | null = null;
 
   down(e: ToolPointer): void {
-    let layer = e.doc.activeLayer();
-    if (e.app.toolOptions[this.id]?.newLayer || !layer || !layer.surface || layer.locked) {
-      if (layer?.locked) { e.app.toast('圖層已鎖定', 'error'); return; }
-      layer = createRasterLayer('形狀', e.doc.width, e.doc.height);
-      e.doc.insertLayerAbove(layer, e.doc.activeLayerId);
+    let target = e.doc.paintTarget();
+    // A brand new layer only makes sense when drawing onto layer pixels.
+    const wantsNewLayer = Boolean(e.app.toolOptions[this.id]?.newLayer);
+    if (!target || (target.slot === 'pixels' && wantsNewLayer)) {
+      if (target === null && e.doc.activeLayer()?.locked) {
+        e.app.toast('圖層已鎖定', 'error');
+        return;
+      }
+      if (!target || target.slot === 'pixels') {
+        const layer = createRasterLayer('形狀', e.doc.width, e.doc.height);
+        e.doc.insertLayerAbove(layer, e.doc.activeLayerId);
+        target = e.doc.paintTarget();
+      }
     }
-    this.layer = layer;
-    this.baseSurface = layer.surface;
-    this.preview = createSurface(layer.surface!.w, layer.surface!.h);
+    if (!target) { e.app.toast('此圖層無法繪製形狀', 'error'); return; }
+    this.target = target;
+    this.baseSurface = target.surface;
+    this.preview = createSurface(target.surface.w, target.surface.h);
     this.dragging = true;
     this.start = { x: e.x, y: e.y };
     this.end = { x: e.x, y: e.y };
-    e.doc.livePreview = { layerId: layer.id, surface: this.preview, isMask: false };
+    e.doc.setPaintPreview(target.layer, target.slot, this.preview);
   }
 
   private paint(e: ToolPointer, target: Surface): void {
@@ -546,13 +556,13 @@ export class ShapeTool implements Tool {
       ctx.strokeStyle = rgbCss(isStrokeOnly || mode === 'stroke' ? e.app.foreground : e.app.background);
       ctx.stroke(path);
     }
-    if (e.doc.selection.active) {
+    if (e.doc.selection.active && this.target?.clipToSelection !== false) {
       ctx.globalCompositeOperation = 'destination-in';
       ctx.drawImage(e.doc.selection.toSurface().canvas, 0, 0);
     }
     target.ctx.clearRect(0, 0, target.w, target.h);
     if (this.baseSurface) target.ctx.drawImage(this.baseSurface.canvas, 0, 0);
-    target.ctx.drawImage(shape.canvas, -(this.layer?.x ?? 0), -(this.layer?.y ?? 0));
+    target.ctx.drawImage(shape.canvas, -(this.target?.offX ?? 0), -(this.target?.offY ?? 0));
   }
 
   move(e: ToolPointer): void {
@@ -563,27 +573,27 @@ export class ShapeTool implements Tool {
   }
 
   up(e: ToolPointer): void {
-    if (!this.dragging || !this.layer) return;
+    if (!this.dragging || !this.target) return;
     this.dragging = false;
-    e.doc.livePreview = null;
+    e.doc.clearPaintPreview();
     if (Math.hypot(this.end.x - this.start.x, this.end.y - this.start.y) > 1) {
-      const target = e.doc.mutableSurface(this.layer);
-      this.paint(e, target);
+      const dest = e.doc.mutablePaintSurface(this.target.layer, this.target.slot);
+      this.paint(e, dest);
       e.doc.commit('繪製形狀');
     } else {
       e.doc.touch();
     }
     this.preview = this.baseSurface = null;
-    this.layer = null;
+    this.target = null;
     e.app.changed();
   }
 
   cancel(app: App): void {
     const doc = app.activeDoc();
-    if (doc) { doc.livePreview = null; doc.touch(); }
+    if (doc) { doc.clearPaintPreview(); doc.touch(); }
     this.dragging = false;
     this.preview = this.baseSurface = null;
-    this.layer = null;
+    this.target = null;
     app.changed();
   }
 }

@@ -1,5 +1,5 @@
 import type { App } from '../core/app';
-import type { PhotoDoc } from '../core/document';
+import type { PaintSlot, PaintTarget, PhotoDoc } from '../core/document';
 import type { Layer } from '../core/types';
 import type { Surface } from '../core/surface';
 import { cloneSurface, createSurface } from '../core/surface';
@@ -54,9 +54,7 @@ abstract class StrokeTool implements Tool {
   protected stroke: Stroke | null = null;
   protected lastPoint: { x: number; y: number } | null = null;
 
-  protected abstract makeStroke(e: ToolPointer, target: {
-    layer: Layer; surface: Surface; isMask: boolean;
-  }): Stroke | null;
+  protected abstract makeStroke(e: ToolPointer, target: PaintTarget): Stroke | null;
 
   protected abstract label(): string;
 
@@ -112,9 +110,9 @@ export class BrushTool extends StrokeTool {
     { key: 'opacityPressure', label: '壓力控制不透明度', type: 'checkbox', default: false },
   ];
 
-  protected makeStroke(e: ToolPointer, t: { layer: Layer; surface: Surface; isMask: boolean }): Stroke {
+  protected makeStroke(e: ToolPointer, t: PaintTarget): Stroke {
     const color = e.alt ? e.app.background : e.app.foreground;
-    return new Stroke(e.doc, t.layer, t.surface, t.isMask, brushSettings(e.app, this.id, color), 'paint');
+    return new Stroke(e.doc, t.layer, t.surface, t.slot, brushSettings(e.app, this.id, color), 'paint');
   }
 
   protected label(): string { return '筆刷'; }
@@ -127,10 +125,10 @@ export class PencilTool extends StrokeTool {
   icon = 'pencil';
   override options: ToolOption[] = [sizeOpt(4), opacityOpt(), flowOpt(), spacingOpt, smoothingOpt];
 
-  protected makeStroke(e: ToolPointer, t: { layer: Layer; surface: Surface; isMask: boolean }): Stroke {
+  protected makeStroke(e: ToolPointer, t: PaintTarget): Stroke {
     const color = e.alt ? e.app.background : e.app.foreground;
     const s = brushSettings(e.app, this.id, color, { hardness: 1, sizePressure: false, spacing: 5 });
-    return new Stroke(e.doc, t.layer, t.surface, t.isMask, s, 'paint');
+    return new Stroke(e.doc, t.layer, t.surface, t.slot, s, 'paint');
   }
 
   protected label(): string { return '鉛筆'; }
@@ -146,14 +144,15 @@ export class EraserTool extends StrokeTool {
     { key: 'sizePressure', label: '壓力控制尺寸', type: 'checkbox', default: true },
   ];
 
-  protected makeStroke(e: ToolPointer, t: { layer: Layer; surface: Surface; isMask: boolean }): Stroke {
-    // On a mask there is no alpha to erase, so paint with the background colour.
-    if (t.isMask) {
+  protected makeStroke(e: ToolPointer, t: PaintTarget): Stroke {
+    // Masks and Quick Mask are opaque greyscale, so there is no alpha to
+    // erase; paint with the background colour instead.
+    if (t.slot !== 'pixels') {
       const s = brushSettings(e.app, this.id, e.app.background);
-      return new Stroke(e.doc, t.layer, t.surface, true, s, 'paint');
+      return new Stroke(e.doc, t.layer, t.surface, t.slot, s, 'paint');
     }
     const s = brushSettings(e.app, this.id, { r: 0, g: 0, b: 0 });
-    return new Stroke(e.doc, t.layer, t.surface, false, s, 'erase');
+    return new Stroke(e.doc, t.layer, t.surface, 'pixels', s, 'erase');
   }
 
   protected label(): string { return '橡皮擦'; }
@@ -183,17 +182,17 @@ class DirectStroke {
 
   constructor(
     private doc: PhotoDoc,
-    private layer: Layer,
+    private layer: Layer | null,
     target: Surface,
-    private isMask: boolean,
+    private slot: PaintSlot,
     private step: number,
     private patch: PatchFn,
   ) {
     this.work = cloneSurface(target);
-    this.offX = isMask ? 0 : layer.x;
-    this.offY = isMask ? 0 : layer.y;
-    this.selection = doc.selection.active ? doc.selection.toSurface() : null;
-    doc.livePreview = { layerId: layer.id, surface: this.work, isMask };
+    this.offX = slot === 'pixels' && layer ? layer.x : 0;
+    this.offY = slot === 'pixels' && layer ? layer.y : 0;
+    this.selection = slot !== 'quickmask' && doc.selection.active ? doc.selection.toSurface() : null;
+    doc.setPaintPreview(layer, slot, this.work);
   }
 
   /** Blend a prepared patch onto the work surface through the brush stamp. */
@@ -238,15 +237,15 @@ class DirectStroke {
   }
 
   commit(label: string): void {
-    this.doc.livePreview = null;
+    this.doc.clearPaintPreview();
     if (!this.any) { this.doc.touch(); return; }
-    const target = this.isMask ? this.doc.mutableMask(this.layer) : this.doc.mutableSurface(this.layer);
+    const target = this.doc.mutablePaintSurface(this.layer, this.slot);
     target.ctx.clearRect(0, 0, target.w, target.h);
     target.ctx.drawImage(this.work.canvas, 0, 0);
     this.doc.commit(label);
   }
 
-  abort(): void { this.doc.livePreview = null; this.doc.touch(); }
+  abort(): void { this.doc.clearPaintPreview(); this.doc.touch(); }
 }
 
 abstract class RetouchTool implements Tool {
@@ -271,7 +270,7 @@ abstract class RetouchTool implements Tool {
     if (!target) { e.app.toast('此圖層無法編輯', 'error'); return; }
     const r = this.radius(e);
     this.ds = new DirectStroke(
-      e.doc, target.layer, target.surface, target.isMask,
+      e.doc, target.layer, target.surface, target.slot,
       Math.max(1, r * 0.25), this.patchFn(e),
     );
     this.ds.begin(e.x, e.y, e.pressure, e, r);
@@ -488,18 +487,20 @@ export class CloneStampTool implements Tool {
     const radius = Math.max(1, Number(o.size ?? 60) / 2);
     const hardness = Number(o.hardness ?? 70) / 100;
     const alpha = (Number(o.opacity ?? 100) / 100) * (Number(o.flow ?? 100) / 100);
-    const srcOffX = o.sampleAll ? 0 : target.layer.x;
-    const srcOffY = o.sampleAll ? 0 : target.layer.y;
+    const layerX = target.slot === 'pixels' && target.layer ? target.layer.x : 0;
+    const layerY = target.slot === 'pixels' && target.layer ? target.layer.y : 0;
+    const srcOffX = o.sampleAll ? 0 : layerX;
+    const srcOffY = o.sampleAll ? 0 : layerY;
 
     this.ds = new DirectStroke(
-      e.doc, target.layer, target.surface, target.isMask, Math.max(1, radius * 0.2),
+      e.doc, target.layer, target.surface, target.slot, Math.max(1, radius * 0.2),
       (work, x, y, r) => {
         const reg = patchRegion(work, x, y, r);
         if (!reg || !this.sampleSurface || !this.offset) return;
         const patch = createSurface(reg.w, reg.h);
         // Layer-space patch position, sampled from the source offset.
-        const sx = reg.px - this.offset.dx + (target.layer.x - srcOffX);
-        const sy = reg.py - this.offset.dy + (target.layer.y - srcOffY);
+        const sx = reg.px - this.offset.dx + (layerX - srcOffX);
+        const sy = reg.py - this.offset.dy + (layerY - srcOffY);
         patch.ctx.drawImage(this.sampleSurface.canvas, -sx, -sy);
         this.ds!.applyPatch(patch, reg.px, reg.py, r, hardness, alpha);
       },
