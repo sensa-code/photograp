@@ -1,5 +1,5 @@
 import type { App } from '../../core/app';
-import { clear, el, on } from '../dom';
+import { clear, el, on, raf } from '../dom';
 import { icon } from '../icons';
 import { runCommand } from '../commands';
 
@@ -21,8 +21,9 @@ export class HistoryPanel {
         el('div', { class: 'tools' }, undo, redo)),
       this.list);
 
-    app.events.on('doc-changed', () => this.refresh());
-    app.events.on('docs-changed', () => this.refresh());
+    const update = raf(() => this.refresh());
+    app.events.on('doc-changed', update);
+    app.events.on('docs-changed', update);
     this.refresh();
   }
 

@@ -54,17 +54,25 @@ export class NavigatorPanel {
   refresh(): void {
     const doc = this.app.activeDoc();
     const ctx = this.canvas.getContext('2d')!;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    if (!doc) { this.frame.style.display = 'none'; return; }
+    if (!doc) {
+      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.frame.style.display = 'none';
+      return;
+    }
 
     const scale = Math.min(this.canvas.width / doc.width, this.canvas.height / doc.height);
     const w = Math.max(1, doc.width * scale);
     const h = Math.max(1, doc.height * scale);
     const ox = (this.canvas.width - w) / 2;
     const oy = (this.canvas.height - h) / 2;
-    ctx.fillStyle = '#3a3a3a';
-    ctx.fillRect(ox, oy, w, h);
-    ctx.drawImage(doc.composite().canvas, ox, oy, w, h);
+    // Mid-stroke the document has no cached composite; keep the last thumbnail
+    // rather than re-flattening the whole image on every frame.
+    if (!doc.livePreview) {
+      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      ctx.fillStyle = '#3a3a3a';
+      ctx.fillRect(ox, oy, w, h);
+      ctx.drawImage(doc.composite().canvas, ox, oy, w, h);
+    }
 
     const v = this.app.view();
     this.zoomInput.value = String(Math.round(clamp(v.zoom * 100, 1, 1600)));

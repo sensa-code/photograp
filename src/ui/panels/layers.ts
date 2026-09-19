@@ -4,7 +4,7 @@ import { BLEND_GROUPS, BLEND_LABELS } from '../../core/blend';
 import { createSurface, type Surface } from '../../core/surface';
 import { findParent, layerKindLabel } from '../../core/layer';
 import { compositeLayers } from '../../core/compositor';
-import { clear, el, on } from '../dom';
+import { clear, el, on, raf } from '../dom';
 import { icon } from './../icons';
 import { runCommand } from '../commands';
 import { popupMenu } from '../menubar';
@@ -44,8 +44,11 @@ export class LayersPanel {
       this.list,
       this.footer());
 
-    app.events.on('doc-changed', () => this.refresh());
-    app.events.on('docs-changed', () => this.refresh());
+    // Painting fires doc-changed on every pointer move; rebuilding the whole
+    // list that often is wasted work, so coalesce into one frame.
+    const update = raf(() => this.refresh());
+    app.events.on('doc-changed', update);
+    app.events.on('docs-changed', update);
     this.refresh();
   }
 
