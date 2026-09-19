@@ -7,6 +7,10 @@ import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
 import type { Rect } from '../src/core/geometry';
 import {
+  carveVertical, contentAwareScale, contentAwareScaleAsync, energyMap, findVerticalSeam,
+  insertVerticalSeam, removeVerticalSeam, resampleMask, transposeMask, transposeRGBA,
+} from '../src/filters/seam';
+import {
   BUILTIN_PATTERNS, cachedPatternSurface, createPattern, describePattern, embeddedPattern,
   forgetPattern, loadPatterns, MAX_PATTERN, patternSurface, resetPatterns, savePatterns,
   tileInto, warmEmbedded,
@@ -1494,6 +1498,263 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- content-aware scale ----
+  group('內容感知比例');
+  /** An image with a flat left half and a hard vertical edge on the right. */
+  const stripeImage = (w: number, h: number, edgeAt: number): ImageData => {
+    const img = new ImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const v = x < edgeAt ? 40 : 230;
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+      }
+    }
+    return img;
+  };
+
+  await test('能量圖在邊緣處最高', () => {
+    const img = stripeImage(20, 10, 10);
+    const e = energyMap(img.data, 20, 10);
+    const atEdge = e[5 * 20 + 10];
+    const flat = e[5 * 20 + 3];
+    assert(atEdge > 100, `邊緣能量應很高，實得 ${atEdge}`);
+    near(flat, 0, 1, '平坦處能量應近乎零');
+  });
+  await test('完全透明的像素不被當成黑色邊緣', () => {
+    const w = 10, h = 6;
+    const img = new ImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        // Left half opaque black, right half fully transparent black.
+        img.data[i] = 0; img.data[i + 1] = 0; img.data[i + 2] = 0;
+        img.data[i + 3] = x < 5 ? 255 : 0;
+      }
+    }
+    const e = energyMap(img.data, w, h);
+    near(e[3 * w + 5], 0, 1, '兩邊都是黑的，不應因為 alpha 跳變而有能量');
+  });
+  await test('接縫會繞開高能量的邊緣', () => {
+    const img = stripeImage(20, 10, 10);
+    const e = energyMap(img.data, 20, 10);
+    const seam = findVerticalSeam(e, 20, 10);
+    assert(seam.length === 10, '每一列都要有一個 x');
+    for (const x of seam) {
+      assert(Math.abs(x - 10) > 1, `接縫不應踩在邊緣上，實得 ${x}`);
+    }
+    // Neighbouring rows may only shift by one pixel.
+    for (let y = 1; y < seam.length; y++) {
+      assert(Math.abs(seam[y] - seam[y - 1]) <= 1, '接縫必須是連續的');
+    }
+  });
+  await test('移除與插入接縫改變寬度', () => {
+    const img = stripeImage(12, 5, 6);
+    const seam = findVerticalSeam(energyMap(img.data, 12, 5), 12, 5);
+    const narrower = removeVerticalSeam(img.data, 12, 5, seam);
+    assert(narrower.length === 11 * 5 * 4, '應少一列');
+    const wider = insertVerticalSeam(img.data, 12, 5, seam);
+    assert(wider.length === 13 * 5 * 4, '應多一列');
+  });
+  await test('轉置兩次會回到原樣', () => {
+    const img = stripeImage(7, 4, 3);
+    const once = transposeRGBA(img.data, 7, 4);
+    const twice = transposeRGBA(once, 4, 7);
+    for (let i = 0; i < img.data.length; i++) {
+      assert(twice[i] === img.data[i], '轉置兩次應相等');
+    }
+    const mask = new Uint8Array(7 * 4);
+    mask[2 * 7 + 5] = 200;
+    const tm = transposeMask(mask, 7, 4);
+    assert(tm[5 * 4 + 2] === 200, '遮罩轉置後位置應對換');
+  });
+  await test('裁減會縮到指定寬度', () => {
+    const img = stripeImage(30, 12, 15);
+    const out = carveVertical(img, 8, false, {}).image;
+    assert(out.width === 22 && out.height === 12, `應為 22×12，實得 ${out.width}×${out.height}`);
+    const grown = carveVertical(img, 5, true, {}).image;
+    assert(grown.width === 35, `應為 35，實得 ${grown.width}`);
+  });
+  await test('插入的接縫不會全擠在同一处', () => {
+    // Inserting one seam at a time would keep re-picking the pixels it just
+    // added, leaving a single smeared band instead of a wider picture.
+    const w = 30, h = 8;
+    const img = new ImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        // A gentle ramp, so every column is about as interesting as the next.
+        const v = 60 + x * 4;
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+      }
+    }
+    const out = carveVertical(img, 10, true, {}).image;
+    assert(out.width === 40, `應為 40，實得 ${out.width}`);
+    // On a ramp of +4 every column, an original reads as 60 + 4x and an
+    // inserted one as the average of its neighbours, 2 more than that. So a
+    // value two above a multiple of four is exactly an inserted column.
+    let inserted = 0, longest = 0, run = 0;
+    for (let x = 0; x < out.width; x++) {
+      const v = out.data[(4 * out.width + x) * 4];
+      if ((v - 60) % 4 === 2) { inserted++; run++; longest = Math.max(longest, run); } else run = 0;
+    }
+    assert(inserted === 10, `應正好插入十列，實得 ${inserted}`);
+    assert(longest < 5, `插入的列不應擠成一坨，最長連續 ${longest}`);
+  });
+  await test('非同步版本結果相同且會回報進度', async () => {
+    const img = stripeImage(24, 8, 12);
+    const sync = contentAwareScale(img, 18, 8);
+    const seen: number[] = [];
+    const async = await contentAwareScaleAsync(img, 18, 8, {
+      onProgress: (t) => seen.push(t),
+    });
+    assert(async.width === sync.width && async.height === sync.height, '尺寸應相同');
+    for (let i = 0; i < sync.data.length; i += 997) {
+      assert(async.data[i] === sync.data[i], '像素應相同');
+    }
+    assert(seen.length > 0, '應回報過進度');
+    near(seen[seen.length - 1], 1, 0.001, '最後應到 1');
+  });
+  await test('裁減不會改到傳進來的影像', () => {
+    const img = stripeImage(20, 8, 10);
+    const before = img.data[0];
+    carveVertical(img, 4, false, {});
+    assert(img.width === 20 && img.data[0] === before, '來源應保持原樣');
+  });
+  await test('不會把影像裁到消失', () => {
+    const img = stripeImage(6, 4, 3);
+    const out = carveVertical(img, 50, false, {}).image;
+    assert(out.width >= 2, `應停在最少寬度，實得 ${out.width}`);
+  });
+  await test('保護遠比平坦區域優先被保留', () => {
+    // A flat image, so only the protect mask decides where the seam goes.
+    const w = 20, h = 8;
+    const img = new ImageData(w, h);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = 128; img.data[i + 1] = 128; img.data[i + 2] = 128; img.data[i + 3] = 255;
+    }
+    const protect = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 8; x < 12; x++) protect[y * w + x] = 255;
+    }
+    const seam = findVerticalSeam(energyMap(img.data, w, h, { protect }), w, h);
+    for (const x of seam) {
+      assert(x < 8 || x >= 12, `接縫不應穿過保護區，實得 ${x}`);
+    }
+  });
+  await test('標記為移除的區域會被優先裁掉', () => {
+    const w = 20, h = 8;
+    const img = new ImageData(w, h);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = 128; img.data[i + 1] = 128; img.data[i + 2] = 128; img.data[i + 3] = 255;
+    }
+    const remove = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 14; x < 17; x++) remove[y * w + x] = 255;
+    }
+    const seam = findVerticalSeam(energyMap(img.data, w, h, { remove }), w, h);
+    for (const x of seam) {
+      assert(x >= 14 && x < 17, `接縫應走在標記區內，實得 ${x}`);
+    }
+  });
+  await test('保護遮罩會跟著影像一起變窄', () => {
+    // If the mask were not carved alongside, the protected band would drift
+    // and later seams would cut straight through it.
+    const w = 24, h = 8;
+    const img = new ImageData(w, h);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i] = 100; img.data[i + 1] = 100; img.data[i + 2] = 100; img.data[i + 3] = 255;
+    }
+    // Mark the protected band with a distinctive colour so we can find it after.
+    const protect = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 10; x < 14; x++) {
+        protect[y * w + x] = 255;
+        const i = (y * w + x) * 4;
+        img.data[i] = 220; img.data[i + 1] = 30; img.data[i + 2] = 30;
+      }
+    }
+    const carved = carveVertical(img, 6, false, { protect });
+    const out = carved.image;
+    assert(out.width === 18, `應縮成 18，實得 ${out.width}`);
+    assert(carved.protect && carved.protect.length === 18 * h, '遮罩應跟著變窄並隨結果回傳');
+    let red = 0;
+    for (let x = 0; x < out.width; x++) {
+      const i = (3 * out.width + x) * 4;
+      if (out.data[i] > 200 && out.data[i + 1] < 80) red++;
+    }
+    assert(red === 4, `保護帶的四列應全數保留，實得 ${red}`);
+  });
+  await test('contentAwareScale 兩個方向都能調', () => {
+    const img = stripeImage(24, 20, 12);
+    const out = contentAwareScale(img, 18, 15);
+    assert(out.width === 18 && out.height === 15, `應為 18×15，實得 ${out.width}×${out.height}`);
+    const bigger = contentAwareScale(img, 28, 24);
+    assert(bigger.width === 28 && bigger.height === 24, `應為 28×24，實得 ${bigger.width}×${bigger.height}`);
+    const same = contentAwareScale(img, 24, 20);
+    assert(same.width === 24 && same.height === 20, '尺寸相同時應原樣回傳');
+  });
+  await test('裁減比直接縮放更能保住主體寬度', () => {
+    // A narrow bright bar on a flat field: carving should take the flat parts.
+    const w = 40, h = 10;
+    const img = new ImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const bar = x >= 18 && x < 22;
+        const v = bar ? 255 : 60;
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+      }
+    }
+    const out = contentAwareScale(img, 28, h);
+    let barWidth = 0;
+    for (let x = 0; x < out.width; x++) {
+      if (out.data[(5 * out.width + x) * 4] > 200) barWidth++;
+    }
+    // A plain resize to 70% would leave the four-pixel bar about three wide.
+    assert(barWidth >= 4, `主體應保住原寬度，實得 ${barWidth}`);
+  });
+  await test('非同步的插入也會分開接縫', async () => {
+    // The async path plans insertions the same way; yielding between seam
+    // searches must not change which columns get duplicated.
+    const w = 30, h = 6;
+    const img = new ImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const v = 60 + x * 4;
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+      }
+    }
+    const out = await contentAwareScaleAsync(img, 40, h);
+    assert(out.width === 40, `應為 40，實得 ${out.width}`);
+    let inserted = 0, longest = 0, run = 0;
+    for (let x = 0; x < out.width; x++) {
+      const v = out.data[(3 * out.width + x) * 4];
+      if ((v - 60) % 4 === 2) { inserted++; run++; longest = Math.max(longest, run); } else run = 0;
+    }
+    assert(inserted === 10, `應插入十列，實得 ${inserted}`);
+    assert(longest < 5, `不應擠成一坨，最長連續 ${longest}`);
+  });
+  await test('進度回報會一路走到一', () => {
+    const img = stripeImage(16, 6, 8);
+    const seen: number[] = [];
+    carveVertical(img, 4, false, { onProgress: (t) => seen.push(t) });
+    assert(seen.length === 4, `應回報四次，實得 ${seen.length}`);
+    near(seen[seen.length - 1], 1, 0.001, '最後一次應是 1');
+  });
+  await test('resampleMask 保留大致的覆蓋位置', () => {
+    const w = 20, h = 10;
+    const src = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 10; x < 20; x++) src[y * w + x] = 255;
+    }
+    const out = resampleMask(src, w, h, 10, 5);
+    assert(out.length === 50, '尺寸應縮半');
+    assert(out[2 * 10 + 7] === 255, '右半邊應還是被覆蓋');
+    assert(out[2 * 10 + 2] === 0, '左半邊應還是空的');
   });
 
   // ---- overlay effects and saved styles ----

@@ -67,6 +67,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       cmdEntry('edit.definePattern'),
       sep,
       cmdEntry('edit.transform'),
+      cmdEntry('edit.contentAwareScale'),
       sub('變形', [
         cmdEntry('edit.flipLayerH'),
         cmdEntry('edit.flipLayerV'),
