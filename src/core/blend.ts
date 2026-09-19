@@ -63,7 +63,9 @@ export function blendSurface(
   dst: Surface, src: Surface, mode: BlendMode, opacity: number,
 ): void {
   if (opacity <= 0) return;
-  const native = NATIVE_BLEND[mode];
+  // Pass-through is handled by the compositor and only means anything for a
+  // group; anywhere else it is an ordinary stack.
+  const native = NATIVE_BLEND[mode === 'pass-through' ? 'normal' : mode];
   if (native) {
     dst.ctx.save();
     dst.ctx.globalAlpha = opacity;
@@ -91,6 +93,7 @@ export const BLEND_GROUPS: { label: string; modes: BlendMode[] }[] = [
 ];
 
 export const BLEND_LABELS: Record<BlendMode, string> = {
+  'pass-through': '穿透',
   normal: '正常',
   dissolve: '溶解',
   darken: '變暗',

@@ -1,7 +1,7 @@
 import type { Layer } from './types';
-import { createSurface, type Surface } from './surface';
+import { cloneSurface, createSurface, type Surface } from './surface';
 import { blendSurface } from './blend';
-import { applyBlendIf } from './blend-range';
+import { applyBlendIf, blendIfMask } from './blend-range';
 import { applyAdjustment } from '../filters/adjustments';
 import { gaussianBlur } from '../filters/blur';
 import { rgbCss } from './color';
@@ -309,6 +309,31 @@ function renderLayerPixels(layer: Layer, opt: CompositeOptions): Surface | null 
   return out;
 }
 
+/**
+ * How strongly a pass-through group applies, as a white surface whose alpha
+ * combines its opacity, its mask and its blend ranges. Null means "all of it",
+ * which the caller can take as a plain replacement.
+ */
+function groupWeight(
+  layer: Layer, gmask: Surface | null, merged: Surface, acc: Surface,
+  opt: CompositeOptions,
+): Surface | null {
+  const alpha = layer.opacity * clamp01(layer.fill);
+  const masked = !!gmask && layer.maskEnabled;
+  const ranges = blendIfMask(merged, acc, layer.blendIf);
+  if (alpha >= 1 && !masked && !ranges) return null;
+
+  const weight = createSurface(opt.width, opt.height);
+  weight.ctx.globalAlpha = alpha;
+  weight.ctx.fillStyle = '#ffffff';
+  weight.ctx.fillRect(0, 0, weight.w, weight.h);
+  weight.ctx.globalAlpha = 1;
+  weight.ctx.globalCompositeOperation = 'destination-in';
+  if (gmask && layer.maskEnabled) weight.ctx.drawImage(maskAlpha(gmask).canvas, 0, 0);
+  if (ranges) weight.ctx.drawImage(ranges.canvas, 0, 0);
+  return weight;
+}
+
 /** The mask in effect for a layer, accounting for a live mask preview. */
 function effectiveMask(layer: Layer, opt: CompositeOptions): Surface | null {
   if (layer.id === opt.overrideLayerId && opt.overrideIsMask && opt.overrideSurface) {
@@ -378,10 +403,52 @@ export function compositeLayers(
       continue;
     }
 
+    // Hidden members draw nothing, so they must not change how the base
+    // layer is treated either.
+    const drawnClipped = clipped.filter(
+      (c) => (solo ? true : c.visible) && c.id !== opt.hideLayerId,
+    );
+
     let body: Surface | null;
     if (layer.kind === 'group') {
-      body = compositeLayers(layer.children ?? [], opt, null);
       const gmask = effectiveMask(layer, opt);
+      // Pass through: the children composite straight onto what is already
+      // underneath, so an adjustment inside the group reaches the layers
+      // below it. A clipping group riding on top needs a shape to clip to,
+      // so that case stays isolated.
+      if (layer.blend === 'pass-through' && !drawnClipped.length) {
+        const merged = compositeLayers(layer.children ?? [], opt, acc);
+        // The result already contains the backdrop, so it *replaces* what is
+        // underneath. Drawing it over instead would composite the backdrop
+        // with itself and thicken anything semi-transparent.
+        const weight = groupWeight(layer, gmask, merged, acc, opt);
+        if (!weight) {
+          acc.ctx.save();
+          acc.ctx.globalCompositeOperation = 'copy';
+          acc.ctx.drawImage(merged.canvas, 0, 0);
+          acc.ctx.restore();
+          continue;
+        }
+        // out = backdrop x (1 - weight) + merged x weight, which is a proper
+        // cross-fade between the document with the group and without it.
+        const keep = cloneSurface(acc);
+        keep.ctx.save();
+        keep.ctx.globalCompositeOperation = 'destination-out';
+        keep.ctx.drawImage(weight.canvas, 0, 0);
+        keep.ctx.restore();
+        merged.ctx.save();
+        merged.ctx.globalCompositeOperation = 'destination-in';
+        merged.ctx.drawImage(weight.canvas, 0, 0);
+        merged.ctx.restore();
+        acc.ctx.save();
+        acc.ctx.globalCompositeOperation = 'copy';
+        acc.ctx.drawImage(keep.canvas, 0, 0);
+        acc.ctx.globalCompositeOperation = 'lighter';
+        acc.ctx.drawImage(merged.canvas, 0, 0);
+        acc.ctx.restore();
+        continue;
+      }
+      body = compositeLayers(layer.children ?? [], opt, null);
       if (gmask && layer.maskEnabled) {
         body.ctx.save();
         body.ctx.globalCompositeOperation = 'destination-in';
@@ -393,16 +460,16 @@ export function compositeLayers(
     }
     if (!body) continue;
 
-    if (clipped.length) {
+    if (drawnClipped.length) {
       // Alpha of the base layer acts as the clip for everything above it.
       const clipMask = createSurface(opt.width, opt.height);
       clipMask.ctx.drawImage(body.canvas, 0, 0);
-      for (const c of clipped) {
-        if (!c.visible && !solo) continue;
-        if (c.id === opt.hideLayerId) continue;
+      for (const c of drawnClipped) {
         if (c.kind === 'adjustment') {
           applyAdjustmentLayer(body, c, clipMask, opt);
         } else {
+          // A clipped member is masked by the base layer, so even a
+          // pass-through group has to be resolved on its own here.
           const cs = c.kind === 'group'
             ? compositeLayers(c.children ?? [], opt, null)
             : renderLayerPixels(c, opt);

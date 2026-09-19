@@ -4679,6 +4679,132 @@ async function run(): Promise<void> {
     assert(comp.layers[0].blendIf.self.w0 === 100, '複製的構成不該共用範圍');
   });
 
+  // ---- pass-through groups ----
+  group('穿透群組');
+  /** A white base with a half-strength brightness cut inside a group. */
+  const darkenGroup = (): { base: Layer; group: Layer } => {
+    const base = createRasterLayer('底', 4, 4, filled(4, 4, '#ffffff'));
+    const adj = createAdjustmentLayer('調整', defaultAdjustment('brightness-contrast'));
+    adj.adjustment = { ...adj.adjustment!, brightness: -60 } as typeof adj.adjustment;
+    const grp = createGroupLayer('群組');
+    grp.children = [adj];
+    return { base, group: grp };
+  };
+
+  await test('新群組預設就是穿透', () => {
+    assert(createGroupLayer('g').blend === 'pass-through', '預設應是穿透');
+  });
+  await test('穿透時群組裡的調整會影響下面', () => {
+    const { base, group: grp } = darkenGroup();
+    const out = compositeLayers([base, grp], { width: 4, height: 4 });
+    assert(pixel(out, 2, 2)[0] < 230, `底圖應該被压暗，實得 ${pixel(out, 2, 2)}`);
+  });
+  await test('關掉穿透就回到孤立的群組', () => {
+    const { base, group: grp } = darkenGroup();
+    grp.blend = 'normal';
+    const out = compositeLayers([base, grp], { width: 4, height: 4 });
+    // An adjustment with nothing of its own to work on leaves the base alone.
+    assert(pixel(out, 2, 2)[0] === 255, `孤立時底圖不該被動到，實得 ${pixel(out, 2, 2)}`);
+  });
+  await test('穿透群組的不透明度是淡入淡出', () => {
+    const { base, group: grp } = darkenGroup();
+    const full = pixel(compositeLayers([base, grp], { width: 4, height: 4 }), 2, 2)[0];
+    grp.opacity = 0.5;
+    const half = pixel(compositeLayers([base, grp], { width: 4, height: 4 }), 2, 2)[0];
+    assert(half > full && half < 255, `一半強度應在中間：${full} / ${half}`);
+    grp.opacity = 0;
+    const none = pixel(compositeLayers([base, grp], { width: 4, height: 4 }), 2, 2)[0];
+    assert(none === 255, `歸零時應該什麼都沒發生，實得 ${none}`);
+  });
+  await test('穿透群組的遮色片只讓部分生效', () => {
+    const { base, group: grp } = darkenGroup();
+    const mask = createSurface(4, 4);
+    mask.ctx.fillStyle = '#000000';
+    mask.ctx.fillRect(0, 0, 4, 4);
+    mask.ctx.fillStyle = '#ffffff';
+    mask.ctx.fillRect(0, 0, 2, 4);
+    grp.mask = mask;
+    const out = compositeLayers([base, grp], { width: 4, height: 4 });
+    assert(pixel(out, 0, 2)[0] < 230, '遮色片白的那半要被压暗');
+    assert(pixel(out, 3, 2)[0] === 255, '遮色片黑的那半要原封不動');
+  });
+  await test('空的穿透群組什麼都不改', () => {
+    const base = createRasterLayer('底', 4, 4, filled(4, 4, '#3366cc'));
+    const grp = createGroupLayer('空');
+    const before = [...compositeLayers([base], { width: 4, height: 4 }).ctx.getImageData(0, 0, 4, 4).data];
+    const after = [...compositeLayers([base, grp], { width: 4, height: 4 }).ctx.getImageData(0, 0, 4, 4).data];
+    assert(before.join() === after.join(), '空群組應該是空操作');
+  });
+  await test('穿透群組也能畫出自己的內容', () => {
+    const base = createRasterLayer('底', 4, 4, filled(4, 4, '#ffffff'));
+    const inner = createRasterLayer('內', 4, 4, filled(4, 4, '#ff0000'));
+    const grp = createGroupLayer('群組');
+    grp.children = [inner];
+    const out = compositeLayers([base, grp], { width: 4, height: 4 });
+    const px = pixel(out, 2, 2);
+    assert(px[0] > 200 && px[1] < 60, `群組內容應該畫得出來，實得 ${px}`);
+  });
+  await test('遮罩到群組上的圖層會讓群組回到孤立', () => {
+    const base = createRasterLayer('底', 4, 4, filled(4, 4, '#ffffff'));
+    const inner = createRasterLayer('內', 4, 4);
+    inner.surface!.ctx.fillStyle = '#0000ff';
+    inner.surface!.ctx.fillRect(0, 0, 2, 4);
+    const grp = createGroupLayer('群組');
+    grp.children = [inner];
+    const clip = createRasterLayer('剪裁', 4, 4, filled(4, 4, '#00ff00'));
+    clip.clipped = true;
+    const out = compositeLayers([base, grp, clip], { width: 4, height: 4 });
+    assert(pixel(out, 0, 2)[1] > 200 && pixel(out, 0, 2)[0] < 60, '剪裁層要貼在群組內容上');
+    assert(pixel(out, 3, 2)[0] === 255, '群組沒內容的地方不該有綠色');
+  });
+  await test('穿透與一般混合都能存進專案檔', async () => {
+    const doc = PhotoDoc.createBlank('pt', 8, 8, 'white');
+    const grp = createGroupLayer('群組');
+    doc.layers.push(grp);
+    const back = await loadProject(await serializeDocument(doc));
+    const loaded = back.layers.find((l) => l.kind === 'group')!;
+    assert(loaded.blend === 'pass-through', `應該還是穿透，實得 ${loaded.blend}`);
+  });
+  await test('非群組的穿透不會讓圖層消失', () => {
+    // Only a hand-edited project could do this; it must not blank the layer.
+    const base = createRasterLayer('底', 4, 4, filled(4, 4, '#ffffff'));
+    const top = createRasterLayer('上', 4, 4, filled(4, 4, '#ff0000'));
+    top.blend = 'pass-through';
+    const out = compositeLayers([base, top], { width: 4, height: 4 });
+    assert(pixel(out, 2, 2)[0] > 200 && pixel(out, 2, 2)[1] < 60, '應該當成正常疊上去');
+  });
+
+  await test('穿透不會把半透明的背景疊厚', () => {
+    const base = createRasterLayer('底', 4, 4);
+    base.surface!.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    base.surface!.ctx.fillRect(0, 0, 4, 4);
+    const before = pixel(compositeLayers([base], { width: 4, height: 4 }), 2, 2)[3];
+    const grp = createGroupLayer('空');
+    const after = pixel(compositeLayers([base, grp], { width: 4, height: 4 }), 2, 2)[3];
+    assert(after === before, `不透明度不該被改：${before} → ${after}`);
+    grp.opacity = 0.5;
+    const half = pixel(compositeLayers([base, grp], { width: 4, height: 4 }), 2, 2)[3];
+    near(half, before, 2, '降不透明度也一樣不該疊厚');
+  });
+  await test('隱藏的剪裁層不會把群組拉回孤立', () => {
+    const { base, group: grp } = darkenGroup();
+    const clip = createRasterLayer('剪裁', 4, 4, filled(4, 4, '#00ff00'));
+    clip.clipped = true;
+    clip.visible = false;
+    const out = compositeLayers([base, grp, clip], { width: 4, height: 4 });
+    assert(pixel(out, 2, 2)[0] < 230, `隱藏的剪裁層應該當作不存在，實得 ${pixel(out, 2, 2)}`);
+  });
+  await test('穿透群組的混合範圍會還原背景', () => {
+    const { base, group: grp } = darkenGroup();
+    // Judge the underlying layer: white is far above the cutoff, so the
+    // group's darkening must be held back everywhere.
+    grp.blendIf.under.w0 = 100;
+    grp.blendIf.under.w1 = 100;
+    const out = compositeLayers([base, grp], { width: 4, height: 4 });
+    const px = pixel(out, 2, 2);
+    assert(px[0] === 255 && px[3] === 255, `被範圍檔下的地方要露出原本的底，實得 ${px}`);
+  });
+
   // ---- tools smoke test ----
   group('工具互動');
   await test('每個工具都能完成一次拖曳而不出錯', () => {

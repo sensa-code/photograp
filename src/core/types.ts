@@ -2,6 +2,9 @@ import type { Surface } from './surface';
 import type { RGB } from './color';
 
 export const BLEND_MODES = [
+  // Groups only: the children composite straight onto the backdrop instead
+  // of into a surface of their own.
+  'pass-through',
   'normal', 'dissolve',
   'darken', 'multiply', 'color-burn', 'linear-burn',
   'lighten', 'screen', 'color-dodge', 'linear-dodge',

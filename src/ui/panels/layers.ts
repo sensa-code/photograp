@@ -67,6 +67,7 @@ export class LayersPanel {
   private kindFilter = 'all';
   private opacityInput!: HTMLInputElement;
   private fillInput!: HTMLInputElement;
+  private passThroughOption!: HTMLOptionElement;
   private blendSelect!: HTMLSelectElement;
   private dragId: string | null = null;
 
@@ -125,6 +126,12 @@ export class LayersPanel {
 
   private controls(): HTMLElement {
     this.blendSelect = el('select') as HTMLSelectElement;
+    // Only a group can pass through, so the option is there but switched off
+    // for everything else rather than appearing and disappearing.
+    this.passThroughOption = el('option', {
+      value: 'pass-through', text: BLEND_LABELS['pass-through'],
+    }) as HTMLOptionElement;
+    this.blendSelect.append(this.passThroughOption);
     for (const group of BLEND_GROUPS) {
       const og = document.createElement('optgroup');
       og.label = group.label;
@@ -375,6 +382,9 @@ export class LayersPanel {
 
     const active = doc.activeLayer();
     if (active) {
+      const isGroup = active.kind === 'group';
+      this.passThroughOption.disabled = !isGroup;
+      this.passThroughOption.hidden = !isGroup;
       this.blendSelect.value = active.blend;
       const show = (input: HTMLInputElement, value: number): void => {
         const pct = Math.round(value * 100);

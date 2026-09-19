@@ -67,7 +67,11 @@ export function createAdjustmentLayer(name: string, adjustment: AdjustmentSpec):
 }
 
 export function createGroupLayer(name: string): Layer {
-  return { ...base(name), kind: 'group', surface: null, children: [], expanded: true, blend: 'normal' };
+  // Photoshop's default: what is inside the group can reach what is below it.
+  return {
+    ...base(name), kind: 'group', surface: null, children: [], expanded: true,
+    blend: 'pass-through',
+  };
 }
 
 /** Shallow record copy; pixel surfaces are shared (copy-on-write). */

@@ -1,5 +1,5 @@
 import type { BlendBand, BlendIf, BlendRangeChannel } from './types';
-import type { Surface } from './surface';
+import { createSurface, type Surface } from './surface';
 import { luminance } from './color';
 
 /** Wide open: nothing is hidden at either end. */
@@ -61,27 +61,59 @@ const channelValue = (
 };
 
 /**
+ * How much of each pixel the blend ranges let through, judging `self` on the
+ * layer's own pixels and `under` on the pixels beneath it. Returns null when
+ * the ranges hide nothing at all.
+ */
+export function blendIfFactors(
+  self: Surface, under: Surface, r: BlendIf,
+): Float32Array | null {
+  if (blendIfIsDefault(r)) return null;
+  const top = self.ctx.getImageData(0, 0, self.w, self.h).data;
+  const back = under.ctx.getImageData(0, 0, under.w, under.h).data;
+  const out = new Float32Array(self.w * self.h);
+  for (let n = 0, i = 0; n < out.length; n++, i += 4) {
+    let f = bandFactor(channelValue(top, i, r.channel), r.self);
+    if (f > 0) {
+      // A transparent backdrop has no colour to compare against, so it lets
+      // the layer through rather than judging it against black.
+      const weight = back[i + 3] / 255;
+      f *= 1 + (bandFactor(channelValue(back, i, r.channel), r.under) - 1) * weight;
+    }
+    out[n] = f < 0 ? 0 : f > 1 ? 1 : f;
+  }
+  return out;
+}
+
+/**
  * Thin `body`'s alpha where the blend ranges say the layer should give way,
  * reading `under` as the pixels already composited beneath it. Mutates `body`,
  * which is a scratch surface the compositor is about to blend and discard.
  */
 export function applyBlendIf(body: Surface, under: Surface, r: BlendIf): void {
-  if (blendIfIsDefault(r)) return;
+  const factors = blendIfFactors(body, under, r);
+  if (!factors) return;
   const img = body.ctx.getImageData(0, 0, body.w, body.h);
-  const back = under.ctx.getImageData(0, 0, under.w, under.h).data;
   const d = img.data;
-  for (let i = 3; i < d.length; i += 4) {
-    if (d[i] === 0) continue;
-    let f = bandFactor(channelValue(d, i - 3, r.channel), r.self);
-    if (f > 0) {
-      // A transparent backdrop has no colour to compare against, so it lets
-      // the layer through rather than judging it against black.
-      const weight = back[i] / 255;
-      f *= 1 + (bandFactor(channelValue(back, i - 3, r.channel), r.under) - 1) * weight;
-    }
-    if (f < 1) d[i] = Math.round(d[i] * Math.max(0, f));
+  for (let n = 0, i = 3; n < factors.length; n++, i += 4) {
+    if (d[i] === 0 || factors[n] >= 1) continue;
+    d[i] = Math.round(d[i] * factors[n]);
   }
   body.ctx.putImageData(img, 0, 0);
+}
+
+/** The same factors as a white surface whose alpha carries them. */
+export function blendIfMask(self: Surface, under: Surface, r: BlendIf): Surface | null {
+  const factors = blendIfFactors(self, under, r);
+  if (!factors) return null;
+  const out = createSurface(self.w, self.h);
+  const img = out.ctx.createImageData(self.w, self.h);
+  for (let n = 0, i = 0; n < factors.length; n++, i += 4) {
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+    img.data[i + 3] = Math.round(factors[n] * 255);
+  }
+  out.ctx.putImageData(img, 0, 0);
+  return out;
 }
 
 /** One line for the layers panel, empty when the ranges do nothing. */
