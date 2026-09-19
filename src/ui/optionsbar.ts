@@ -6,6 +6,7 @@ import { clear, el, on } from './dom';
 import { icon } from './icons';
 import { colorChip, segmentedControl, selectControl } from './modal';
 import { GRADIENT_PRESETS, presetStops, renderGradient } from '../tools/draw';
+import { gradientEditor } from './dialogs/gradient';
 import { createSurface } from '../core/surface';
 import type { RGB } from '../core/color';
 
@@ -125,7 +126,9 @@ export class OptionsBar {
   }
 
   private gradientPreview(values: Record<string, unknown>): HTMLElement {
-    const canvas = el('canvas', { width: 130, height: 20, style: 'border:1px solid var(--line);border-radius:3px' }) as HTMLCanvasElement;
+    const canvas = el('canvas', {
+      width: 130, height: 20, class: 'gradient-swatch', title: '點一下開啟漸層編輯器',
+    }) as HTMLCanvasElement;
     const draw = (): void => {
       const s = createSurface(130, 20);
       const stops = presetStops(String(values.preset ?? 'fg-bg'), this.app.foreground, this.app.background);
@@ -135,7 +138,9 @@ export class OptionsBar {
       ctx.drawImage(s.canvas, 0, 0);
     };
     draw();
+    // Clicking the swatch opens the editor, as it does in Photoshop.
+    on(canvas, 'click', () => gradientEditor(this.app));
     void GRADIENT_PRESETS;
-    return el('div', { class: 'opt' }, el('label', { text: '預視' }), canvas);
+    return el('div', { class: 'opt' }, el('label', { text: '漸層' }), canvas);
   }
 }

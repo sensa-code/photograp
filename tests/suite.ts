@@ -5,6 +5,8 @@
 import { hexToRgb, hslToRgb, hsvToRgb, rgbToHex, rgbToHsl, rgbToHsv } from '../src/core/color';
 import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
+import type { Rect } from '../src/core/geometry';
+import type { Layer } from '../src/core/types';
 import { compositeLayers } from '../src/core/compositor';
 import { createAdjustmentLayer, createRasterLayer, duplicateLayer } from '../src/core/layer';
 import { maskAlpha, maskFromCoverage, coverageFromMask } from '../src/core/mask';
@@ -19,7 +21,13 @@ import {
   loadPresets, resetPresets, savePresets, settingsFromOptions,
 } from '../src/core/brush-presets';
 import { floodSelect } from '../src/tools/select';
-import { renderGradient, presetStops, shapePath } from '../src/tools/draw';
+import {
+  renderGradient, presetStops, shapePath, refreshGradientOptions, GRADIENT_PRESETS,
+} from '../src/tools/draw';
+import {
+  BUILTIN_GRADIENTS, cloneStops, createGradient, describeGradient, loadGradients,
+  resetGradients, resolveStops, saveGradients, sortStops,
+} from '../src/core/gradients';
 import {
   defaultPathBinding, defaultTextStyle, renderTextLayer, measureText,
 } from '../src/core/text';
@@ -52,7 +60,9 @@ import {
 } from '../src/core/shape';
 import { computeHistogram } from '../src/ui/dialogs/widgets';
 import { transformTool } from '../src/tools';
-import { runCommand } from '../src/ui/commands';
+import {
+  runCommand, alignDelta, alignTarget, distributeDeltas, moveBlockReason, moveLayerBy,
+} from '../src/ui/commands';
 import { statsFor } from '../src/ui/panels/histogram';
 import { layerMatchesFilter } from '../src/ui/panels/layers';
 
@@ -1468,6 +1478,294 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- align and distribute ----
+  group('對齊與分佈');
+  const box = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+  await test('對齊位移的計算', () => {
+    const into = box(0, 0, 100, 100);
+    const b = box(20, 30, 40, 20);
+    near(alignDelta(b, into, 'left').dx, -20, 0.001, '靠左');
+    near(alignDelta(b, into, 'right').dx, 40, 0.001, '靠右');
+    near(alignDelta(b, into, 'centerH').dx, 10, 0.001, '水平置中');
+    near(alignDelta(b, into, 'top').dy, -30, 0.001, '靠上');
+    near(alignDelta(b, into, 'bottom').dy, 50, 0.001, '靠下');
+    near(alignDelta(b, into, 'centerV').dy, 10, 0.001, '垂直置中');
+    assert(alignDelta(b, into, 'left').dy === 0, '水平對齊不動到 Y');
+    assert(alignDelta(b, into, 'top').dx === 0, '垂直對齊不動到 X');
+  });
+  await test('對齊目標是選取範圍，沒選取時是畫布', () => {
+    const doc = PhotoDoc.createBlank('align-target', 200, 120, 'white');
+    const full = alignTarget(doc);
+    assert(full.x === 0 && full.w === 200 && full.h === 120, '沒選取時應是整張畫布');
+    const p2 = new Path2D();
+    p2.rect(40, 20, 60, 50);
+    doc.selection.combine(rasterizePath(p2, 200, 120), 'replace');
+    const sel = alignTarget(doc);
+    near(sel.x, 40, 1, '選取範圍 X');
+    near(sel.w, 60, 1, '選取範圍寬');
+  });
+  await test('平均分佈會拉出相等的間距', () => {
+    const boxes = [box(0, 0, 10, 10), box(15, 0, 10, 10), box(100, 0, 10, 10)];
+    const d = distributeDeltas(boxes, 'h');
+    const after = boxes.map((b, i) => ({ ...b, x: b.x + d[i].dx }));
+    const gap1 = after[1].x - (after[0].x + after[0].w);
+    const gap2 = after[2].x - (after[1].x + after[1].w);
+    near(gap1, gap2, 0.001, '兩段間距應相等');
+    near(after[0].x, 0, 0.001, '第一個不動');
+    near(after[2].x, 100, 0.001, '最後一個不動');
+  });
+  await test('分佈會依位置排序而不是依輸入順序', () => {
+    const boxes = [box(100, 0, 10, 10), box(0, 0, 10, 10), box(40, 0, 10, 10)];
+    const d = distributeDeltas(boxes, 'h');
+    const after = boxes.map((b, i) => b.x + d[i].dx);
+    near(after[1], 0, 0.001, '最左的不動');
+    near(after[0], 100, 0.001, '最右的不動');
+    near(after[2], 50, 0.001, '中間的應落在均分點');
+  });
+  await test('少於三個時分佈不動作', () => {
+    const boxes = [box(0, 0, 10, 10), box(50, 0, 10, 10)];
+    const d = distributeDeltas(boxes, 'h');
+    assert(d.every((x) => x.dx === 0 && x.dy === 0), '兩個時不應有位移');
+  });
+  await test('垂直分佈只動 Y', () => {
+    const boxes = [box(0, 0, 10, 10), box(0, 15, 10, 10), box(0, 100, 10, 10)];
+    const d = distributeDeltas(boxes, 'v');
+    assert(d.every((x) => x.dx === 0), '不應動到 X');
+    const after = boxes.map((b, i) => b.y + d[i].dy);
+    near(after[1] - after[0], after[2] - after[1], 0.001, '間距應相等');
+  });
+  await test('移動圖層時群組會帶著子圖層', () => {
+    const doc = PhotoDoc.createBlank('align-group', 100, 100, 'white');
+    const a = createRasterLayer('a', 100, 100);
+    const b = createRasterLayer('b', 100, 100);
+    a.x = 5; b.x = 9;
+    const g = createRasterLayer('g', 100, 100);
+    g.kind = 'group';
+    g.surface = null;
+    g.children = [a, b];
+    moveLayerBy(doc, g, 10, -3);
+    assert(a.x === 15 && b.x === 19, '子圖層應一起搬動');
+    assert(a.y === -3 && b.y === -3, '垂直也要搬');
+  });
+  await test('移動形狀圖層會折入幾何', () => {
+    const doc = PhotoDoc.createBlank('align-shape', 100, 100, 'white');
+    const layer = createRasterLayer('形狀', 100, 100);
+    layer.kind = 'shape';
+    layer.shape = {
+      path: shapeToVectorPath('rect', 10, 10, 30, 30, 0, 5),
+      style: defaultShapeStyle({ r: 255, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }),
+    };
+    renderShapeLayer(layer, 100, 100);
+    moveLayerBy(doc, layer, 20, 5);
+    assert(layer.x === 0 && layer.y === 0, '位移應已折入幾何');
+    const xs = layer.shape.path.subpaths[0].anchors.map((p) => p.x);
+    near(Math.min(...xs), 30, 0.001, '控制點應搬過去');
+  });
+  await test('沿路徑的文字不接受對齊', () => {
+    const plain = createRasterLayer('點陣', 20, 20);
+    assert(moveBlockReason(plain) === null, '一般圖層可對齊');
+    plain.locked = true;
+    assert(moveBlockReason(plain)?.includes('鎖定'), '鎖定圖層應說明原因');
+    const style = defaultTextStyle();
+    style.text = 'X';
+    style.onPath = defaultPathBinding('p1');
+    const onPath = createTextLayer('文字', 20, 20, style);
+    assert(moveBlockReason(onPath)?.includes('路徑'), '路徑文字應說明原因');
+  });
+  await test('靠右對齊會把圖層推到畫布邊緣', () => {
+    const doc = PhotoDoc.createBlank('align-run', 200, 100, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const layer = createRasterLayer('方塊', 200, 100);
+    layer.surface!.ctx.fillStyle = '#ff0000';
+    layer.surface!.ctx.fillRect(10, 10, 40, 20);
+    doc.layers.push(layer);
+    doc.activeLayerId = layer.id;
+    runCommand(app, 'layer.alignRight');
+    const b = layerBounds(layer)!;
+    near(b.x + b.w, 200, 1, '右邊應貼到畫布右緣');
+    runCommand(app, 'layer.alignBottom');
+    const b2 = layerBounds(layer)!;
+    near(b2.y + b2.h, 100, 1, '下邊應貼到畫布下緣');
+    assert(doc.history.snapshots.some((h) => h.label === '對齊圖層'), '應記下步驟');
+  });
+  await test('水平平均分佈會拉齊三個圖層', () => {
+    const doc = PhotoDoc.createBlank('dist-run', 300, 100, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    doc.layers.length = 0;
+    const at = (x: number): Layer => {
+      const l = createRasterLayer(`方塊 ${x}`, 300, 100);
+      l.surface!.ctx.fillStyle = '#000';
+      l.surface!.ctx.fillRect(x, 10, 20, 20);
+      doc.layers.push(l);
+      return l;
+    };
+    const a = at(0), b = at(30), c = at(200);
+    doc.activeLayerId = b.id;
+    runCommand(app, 'layer.distributeH');
+    const boxes = [a, b, c].map((l) => layerBounds(l)!);
+    const gap1 = boxes[1].x - (boxes[0].x + boxes[0].w);
+    const gap2 = boxes[2].x - (boxes[1].x + boxes[1].w);
+    near(gap1, gap2, 1.5, `間距應相等，實得 ${gap1} vs ${gap2}`);
+    assert(gap1 > 0, `方塊不應疊在一起，實得 ${gap1}`);
+    assert(doc.history.snapshots.some((h) => h.label === '水平平均分佈'), '應記下步驟');
+  });
+  await test('底圖不會把分佈拉坦', () => {
+    // A full-canvas background has nowhere to go; including it used to drag
+    // every other layer into a negative-gap heap.
+    const doc = PhotoDoc.createBlank('dist-bg', 300, 100, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const at = (x: number): Layer => {
+      const l = createRasterLayer(`方塊 ${x}`, 300, 100);
+      l.surface!.ctx.fillStyle = '#000';
+      l.surface!.ctx.fillRect(x, 10, 20, 20);
+      doc.layers.push(l);
+      return l;
+    };
+    const a = at(0), b = at(30), c = at(200);
+    doc.activeLayerId = b.id;
+    runCommand(app, 'layer.distributeH');
+    const boxes = [a, b, c].map((l) => layerBounds(l)!);
+    near(boxes[0].x, 0, 1, '最左的不動');
+    near(boxes[2].x, 200, 1, '最右的不動');
+    const gap1 = boxes[1].x - (boxes[0].x + boxes[0].w);
+    const gap2 = boxes[2].x - (boxes[1].x + boxes[1].w);
+    assert(gap1 > 0 && gap2 > 0, `間距應為正，實得 ${gap1} / ${gap2}`);
+    near(gap1, gap2, 1.5, '間距應相等');
+  });
+
+  // ---- gradient editor ----
+  group('漸層編輯器');
+  await test('內建漸層都至少有兩個色標', () => {
+    assert(BUILTIN_GRADIENTS.length >= 6, '內建漸層數量');
+    for (const g of BUILTIN_GRADIENTS) {
+      assert(g.stops.length >= 2, `${g.name} 至少要兩個色標`);
+      assert(g.builtin === true, `${g.name} 應標記為內建`);
+      const ps = g.stops.map((x) => x.pos);
+      assert(Math.min(...ps) === 0 && Math.max(...ps) === 1, `${g.name} 應涵蓋頭尾`);
+    }
+  });
+  await test('前景背景色標會跟著顏色走', () => {
+    const fg = { r: 10, g: 20, b: 30 };
+    const bg = { r: 200, g: 210, b: 220 };
+    const out = resolveStops(BUILTIN_GRADIENTS[0].stops, fg, bg);
+    assert(out[0].color.r === 10 && out[1].color.r === 200, '應解析成目前的前景與背景色');
+    const other = resolveStops(BUILTIN_GRADIENTS[0].stops, bg, fg);
+    assert(other[0].color.r === 200, '換了前景色就跟著換');
+    assert(BUILTIN_GRADIENTS[0].stops[0].color.r === 0, '不應改到原本的色標');
+  });
+  await test('固定顏色的色標不受前景色影響', () => {
+    const black = BUILTIN_GRADIENTS.find((g) => g.id === 'black-white')!;
+    const out = resolveStops(black.stops, { r: 9, g: 9, b: 9 }, { r: 9, g: 9, b: 9 });
+    assert(out[0].color.r === 0 && out[1].color.r === 255, '黑到白應維持原樣');
+  });
+  await test('sortStops 不會改到原陣列', () => {
+    const raw = [
+      { pos: 0.8, color: { r: 1, g: 1, b: 1 }, alpha: 1 },
+      { pos: 0.1, color: { r: 2, g: 2, b: 2 }, alpha: 1 },
+    ];
+    const sorted = sortStops(raw);
+    near(sorted[0].pos, 0.1, 0.0001, '應依位置排序');
+    near(raw[0].pos, 0.8, 0.0001, '原陣列不變');
+  });
+  await test('cloneStops 是深拷貝', () => {
+    const src = [{ pos: 0, color: { r: 1, g: 2, b: 3 }, alpha: 1 }];
+    const copy = cloneStops(src);
+    copy[0].color.r = 99;
+    assert(src[0].color.r === 1, '改複本不應影響原本');
+  });
+  await test('自訂漸層可以存起來再載入', () => {
+    const base = resetGradients();
+    const mine = createGradient('測試漸層', [
+      { pos: 0, color: { r: 255, g: 0, b: 0 }, alpha: 1 },
+      { pos: 0.5, color: { r: 0, g: 255, b: 0 }, alpha: 0.5 },
+      { pos: 1, color: { r: 0, g: 0, b: 255 }, alpha: 1 },
+    ]);
+    saveGradients([...base, mine]);
+    const back = loadGradients();
+    const found = back.find((g) => g.name === '測試漸層')!;
+    assert(found, '應載得回來');
+    assert(found.builtin !== true, '自訂漸層不是內建');
+    assert(found.stops.length === 3, '色標數應一致');
+    near(found.stops[1].alpha, 0.5, 0.0001, '不透明度應一致');
+    assert(back.filter((g) => g.builtin).length === BUILTIN_GRADIENTS.length, '內建漸層應仍在');
+    resetGradients();
+    assert(!loadGradients().some((g) => g.name === '測試漸層'), '恢復內建應清掉自訂的');
+  });
+  await test('載入時會修正壞掉的資料', () => {
+    localStorage.setItem('photograp.gradients.v1', JSON.stringify({
+      user: [{ id: '', name: '', stops: [{ pos: 0, color: { r: 1, g: 1, b: 1 }, alpha: 1 }] }],
+    }));
+    const back = loadGradients();
+    const broken = back[back.length - 1];
+    assert(broken.id.length > 0, '應補上 id');
+    assert(broken.stops.length >= 2, '只有一個色標時應補成清單');
+    resetGradients();
+  });
+  await test('選單選項會跟著儲存的漸層更新', () => {
+    resetGradients();
+    refreshGradientOptions();
+    const before = GRADIENT_PRESETS.length;
+    saveGradients([...loadGradients(), createGradient('附加', [
+      { pos: 0, color: { r: 0, g: 0, b: 0 }, alpha: 1 },
+      { pos: 1, color: { r: 9, g: 9, b: 9 }, alpha: 1 },
+    ])]);
+    refreshGradientOptions();
+    assert(GRADIENT_PRESETS.length === before + 1, '選單應多一項');
+    assert(GRADIENT_PRESETS.some((o) => o.label === '附加'), '應列出新漸層');
+    resetGradients();
+    refreshGradientOptions();
+    assert(GRADIENT_PRESETS.length === before, '恢復後應回到原數量');
+  });
+  await test('presetStops 以 id 取得排好序的色標', () => {
+    const stops = presetStops('spectrum', { r: 0, g: 0, b: 0 }, { r: 0, g: 0, b: 0 });
+    assert(stops.length === 7, `光譜應有 7 個色標，實得 ${stops.length}`);
+    for (let i = 1; i < stops.length; i++) {
+      assert(stops[i].pos >= stops[i - 1].pos, '色標應已排序');
+    }
+    const unknown = presetStops('沒這個', { r: 1, g: 2, b: 3 }, { r: 4, g: 5, b: 6 });
+    assert(unknown.length >= 2, '找不到時應退回第一個內建漸層');
+  });
+  await test('自訂漸層畫出來的像素正確', () => {
+    resetGradients();
+    const mine = createGradient('紅綠藍', [
+      { pos: 0, color: { r: 255, g: 0, b: 0 }, alpha: 1 },
+      { pos: 0.5, color: { r: 0, g: 255, b: 0 }, alpha: 1 },
+      { pos: 1, color: { r: 0, g: 0, b: 255 }, alpha: 1 },
+    ]);
+    saveGradients([...loadGradients(), mine]);
+    const s = createSurface(100, 10);
+    renderGradient(
+      s, 'linear', 0, 0, 100, 0,
+      presetStops(mine.id, { r: 0, g: 0, b: 0 }, { r: 0, g: 0, b: 0 }), false, false,
+    );
+    const left = pixel(s, 2, 5), mid = pixel(s, 50, 5), right = pixel(s, 97, 5);
+    assert(left[0] > 200 && left[1] < 60, `左端應是紅的，實得 ${left}`);
+    assert(mid[1] > 200 && mid[0] < 60, `中間應是綠的，實得 ${mid}`);
+    assert(right[2] > 200 && right[0] < 60, `右端應是藍的，實得 ${right}`);
+    resetGradients();
+  });
+  await test('色標的不透明度會畫出來', () => {
+    const s = createSurface(100, 10);
+    renderGradient(s, 'linear', 0, 0, 100, 0, [
+      { pos: 0, color: { r: 255, g: 0, b: 0 }, alpha: 1 },
+      { pos: 1, color: { r: 255, g: 0, b: 0 }, alpha: 0 },
+    ], false, false);
+    assert(pixel(s, 2, 5)[3] > 230, '左端應不透明');
+    assert(pixel(s, 97, 5)[3] < 30, '右端應透明');
+  });
+  await test('describeGradient 會標出重點', () => {
+    const plain = describeGradient([
+      { pos: 0, color: { r: 0, g: 0, b: 0 }, alpha: 1 },
+      { pos: 1, color: { r: 0, g: 0, b: 0 }, alpha: 1 },
+    ]);
+    assert(plain.includes('2 個色標') && !plain.includes('透明度'), `描述有誤：${plain}`);
+    const fancy = describeGradient(BUILTIN_GRADIENTS[1].stops);
+    assert(fancy.includes('透明度') && fancy.includes('前景'), `描述不完整：${fancy}`);
   });
 
   // ---- history snapshots and the history brush ----

@@ -6,6 +6,7 @@ import {
   findParent, flattenLayers, layerKindLabel,
 } from '../core/layer';
 import { layerBounds } from '../core/guides';
+import type { Rect } from '../core/geometry';
 import { renderShapeLayer, transformPathPoints } from '../core/shape';
 import { cloneSurface, createSurface, opaqueBounds } from '../core/surface';
 import { compositeLayers } from '../core/compositor';
@@ -180,6 +181,128 @@ function guardPixelEdit(app: App, layer: Layer): boolean {
   if (!PhotoDoc.regenerates(layer)) return true;
   app.toast(`${layerKindLabel(layer)}請先點陣化才能直接修改像素`, 'error');
   return false;
+}
+
+export type AlignEdge =
+  | 'left' | 'centerH' | 'right' | 'top' | 'centerV' | 'bottom';
+
+/**
+ * Shift a layer by a document-space delta. Most layers just move their origin;
+ * a group carries its children, and a shape folds the move into its geometry
+ * so the path and the pixels stay in step.
+ */
+export function moveLayerBy(doc: PhotoDoc, layer: Layer, dx: number, dy: number): void {
+  if (!dx && !dy) return;
+  if (layer.kind === 'group') {
+    for (const child of layer.children ?? []) moveLayerBy(doc, child, dx, dy);
+    return;
+  }
+  layer.x += dx;
+  layer.y += dy;
+  if (layer.kind === 'shape' && layer.shape) renderShapeLayer(layer, doc.width, doc.height);
+}
+
+/** Why this layer cannot be nudged into place, phrased for the user. */
+export function moveBlockReason(layer: Layer): string | null {
+  if (layer.locked) return '圖層已鎖定';
+  // Type on a path takes its position from the curve, not from the layer.
+  if (layer.text?.onPath) return '沿路徑的文字要改路徑或起點位移，不能直接對齊';
+  if (!layer.surface && layer.kind !== 'group') return '這個圖層沒有可對齊的內容';
+  return null;
+}
+
+/** The rectangle everything lines up against: the selection, else the canvas. */
+export function alignTarget(doc: PhotoDoc): Rect {
+  return doc.selection.bounds() ?? { x: 0, y: 0, w: doc.width, h: doc.height };
+}
+
+/** How far `box` has to move to sit against `edge` of `into`. */
+export function alignDelta(box: Rect, into: Rect, edge: AlignEdge): { dx: number; dy: number } {
+  switch (edge) {
+    case 'left': return { dx: into.x - box.x, dy: 0 };
+    case 'right': return { dx: into.x + into.w - (box.x + box.w), dy: 0 };
+    case 'centerH': return { dx: into.x + (into.w - box.w) / 2 - box.x, dy: 0 };
+    case 'top': return { dx: 0, dy: into.y - box.y };
+    case 'bottom': return { dx: 0, dy: into.y + into.h - (box.y + box.h) };
+    case 'centerV': return { dx: 0, dy: into.y + (into.h - box.h) / 2 - box.y };
+  }
+}
+
+/**
+ * Even gaps between the outer two boxes, Photoshop's "distribute spacing".
+ * Returns the shift for each input box, in the order they were given.
+ */
+export function distributeDeltas(
+  boxes: Rect[], axis: 'h' | 'v',
+): { dx: number; dy: number }[] {
+  const out = boxes.map(() => ({ dx: 0, dy: 0 }));
+  if (boxes.length < 3) return out;
+  const pos = (r: Rect): number => (axis === 'h' ? r.x : r.y);
+  const size = (r: Rect): number => (axis === 'h' ? r.w : r.h);
+  const order = boxes.map((r, i) => ({ r, i })).sort((a, b) => pos(a.r) - pos(b.r));
+  const first = order[0].r, last = order[order.length - 1].r;
+  const span = (pos(last) + size(last)) - pos(first);
+  const used = order.reduce((n, o) => n + size(o.r), 0);
+  const gap = (span - used) / (order.length - 1);
+  let cursor = pos(first);
+  for (const o of order) {
+    const shift = cursor - pos(o.r);
+    if (axis === 'h') out[o.i].dx = shift; else out[o.i].dy = shift;
+    cursor += size(o.r) + gap;
+  }
+  return out;
+}
+
+/**
+ * Siblings of the active layer that have somewhere to go. A layer whose
+ * content fills the canvas — a background — is left out: it cannot be spaced
+ * against anything, and including it drags everything else into a heap.
+ */
+function alignSiblings(doc: PhotoDoc): Layer[] {
+  const active = doc.activeLayer();
+  if (!active) return [];
+  const found = findParent(doc.layers, active.id);
+  const list = found ? found.list : doc.layers;
+  return list.filter((l) => {
+    if (!l.visible || moveBlockReason(l)) return false;
+    const b = layerBounds(l);
+    return !!b && (b.w < doc.width || b.h < doc.height);
+  });
+}
+
+function alignActiveLayer(app: App, edge: AlignEdge): void {
+  const doc = app.activeDoc();
+  const layer = doc?.activeLayer();
+  if (!doc || !layer) return;
+  const why = moveBlockReason(layer);
+  if (why) { app.toast(why, 'error'); return; }
+  const box = layerBounds(layer);
+  if (!box) { app.toast('這個圖層沒有可對齊的內容', 'error'); return; }
+  const { dx, dy } = alignDelta(box, alignTarget(doc), edge);
+  if (!dx && !dy) { app.status('已經對齊了'); return; }
+  moveLayerBy(doc, layer, Math.round(dx), Math.round(dy));
+  doc.commit('對齊圖層');
+  app.changed();
+}
+
+function distributeLayers(app: App, axis: 'h' | 'v'): void {
+  const doc = app.activeDoc();
+  if (!doc) return;
+  const layers = alignSiblings(doc);
+  if (layers.length < 3) {
+    app.toast('需要至少三個同層級的可見圖層才能平均分佈', 'error');
+    return;
+  }
+  const boxes = layers.map((l) => layerBounds(l)!);
+  const deltas = distributeDeltas(boxes, axis);
+  let moved = false;
+  layers.forEach((l, i) => {
+    const dx = Math.round(deltas[i].dx), dy = Math.round(deltas[i].dy);
+    if (dx || dy) { moveLayerBy(doc, l, dx, dy); moved = true; }
+  });
+  if (!moved) { app.status('已經平均分佈了'); return; }
+  doc.commit(axis === 'h' ? '水平平均分佈' : '垂直平均分佈');
+  app.changed();
 }
 
 function rasterizeLayer(app: App): void {
@@ -530,6 +653,14 @@ export const COMMANDS: CmdType[] = [
     a.changed();
   }, { enabled: hasDoc }),
   cmd('layer.rasterize', '點陣化圖層', (a) => rasterizeLayer(a), { enabled: hasDoc }),
+  cmd('layer.alignLeft', '靠左對齊', (a) => alignActiveLayer(a, 'left'), { enabled: hasRaster }),
+  cmd('layer.alignCenterH', '水平置中對齊', (a) => alignActiveLayer(a, 'centerH'), { enabled: hasRaster }),
+  cmd('layer.alignRight', '靠右對齊', (a) => alignActiveLayer(a, 'right'), { enabled: hasRaster }),
+  cmd('layer.alignTop', '靠上對齊', (a) => alignActiveLayer(a, 'top'), { enabled: hasRaster }),
+  cmd('layer.alignCenterV', '垂直置中對齊', (a) => alignActiveLayer(a, 'centerV'), { enabled: hasRaster }),
+  cmd('layer.alignBottom', '靠下對齊', (a) => alignActiveLayer(a, 'bottom'), { enabled: hasRaster }),
+  cmd('layer.distributeH', '水平平均分佈', (a) => distributeLayers(a, 'h'), { enabled: hasDoc }),
+  cmd('layer.distributeV', '垂直平均分佈', (a) => distributeLayers(a, 'v'), { enabled: hasDoc }),
   cmd('layer.group', '群組圖層', (a) => groupLayers(a), { shortcut: 'Ctrl+G', enabled: hasDoc }),
   cmd('layer.mergeDown', '向下合併', (a) => mergeDown(a), { shortcut: 'Ctrl+E', enabled: hasDoc }),
   cmd('layer.mergeVisible', '合併可見圖層', (a) => mergeVisible(a), { shortcut: 'Ctrl+Shift+E', enabled: hasDoc }),

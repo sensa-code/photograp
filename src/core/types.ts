@@ -73,7 +73,13 @@ export type AdjustmentSpec =
 
 export type AdjustmentType = AdjustmentSpec['type'];
 
-export interface GradientStop { pos: number; color: RGB; alpha: number }
+export interface GradientStop {
+  pos: number;
+  color: RGB;
+  alpha: number;
+  /** Follow the live foreground or background colour instead of `color`. */
+  ref?: 'fg' | 'bg';
+}
 
 export interface TextStyle {
   text: string;

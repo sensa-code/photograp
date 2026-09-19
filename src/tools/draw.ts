@@ -6,6 +6,7 @@ import { createSurface, type Surface } from '../core/surface';
 import { clamp, normalizeRect } from '../core/geometry';
 import { rgbCss, type RGB } from '../core/color';
 import { createRasterLayer, createTextLayer } from '../core/layer';
+import { gradientById, loadGradients, resolveStops, sortStops } from '../core/gradients';
 import {
   defaultShapeStyle, renderShapeLayer, shapeToVectorPath, type ShapeKind as VectorShapeKind,
 } from '../core/shape';
@@ -145,45 +146,18 @@ function dilate(src: Uint8Array, w: number, h: number, r: number): Uint8Array {
 
 export type GradientKind = 'linear' | 'radial' | 'angle' | 'reflected' | 'diamond';
 
-export const GRADIENT_PRESETS: { value: string; label: string }[] = [
-  { value: 'fg-bg', label: '前景到背景' },
-  { value: 'fg-transparent', label: '前景到透明' },
-  { value: 'black-white', label: '黑到白' },
-  { value: 'spectrum', label: '光譜' },
-  { value: 'sunset', label: '日落' },
-  { value: 'transparent-fg', label: '透明到前景' },
-];
+/** Choices for the tool's gradient picker, rebuilt when the user saves one. */
+export const GRADIENT_PRESETS: { value: string; label: string }[] = [];
 
+export function refreshGradientOptions(): void {
+  GRADIENT_PRESETS.length = 0;
+  for (const g of loadGradients()) GRADIENT_PRESETS.push({ value: g.id, label: g.name });
+}
+refreshGradientOptions();
+
+/** The stops of a saved gradient, with any foreground/background refs resolved. */
 export function presetStops(preset: string, fg: RGB, bg: RGB): GradientStop[] {
-  switch (preset) {
-    case 'fg-transparent':
-      return [{ pos: 0, color: fg, alpha: 1 }, { pos: 1, color: fg, alpha: 0 }];
-    case 'transparent-fg':
-      return [{ pos: 0, color: fg, alpha: 0 }, { pos: 1, color: fg, alpha: 1 }];
-    case 'black-white':
-      return [
-        { pos: 0, color: { r: 0, g: 0, b: 0 }, alpha: 1 },
-        { pos: 1, color: { r: 255, g: 255, b: 255 }, alpha: 1 },
-      ];
-    case 'spectrum':
-      return [
-        { pos: 0, color: { r: 255, g: 0, b: 0 }, alpha: 1 },
-        { pos: 0.17, color: { r: 255, g: 255, b: 0 }, alpha: 1 },
-        { pos: 0.34, color: { r: 0, g: 255, b: 0 }, alpha: 1 },
-        { pos: 0.5, color: { r: 0, g: 255, b: 255 }, alpha: 1 },
-        { pos: 0.67, color: { r: 0, g: 0, b: 255 }, alpha: 1 },
-        { pos: 0.84, color: { r: 255, g: 0, b: 255 }, alpha: 1 },
-        { pos: 1, color: { r: 255, g: 0, b: 0 }, alpha: 1 },
-      ];
-    case 'sunset':
-      return [
-        { pos: 0, color: { r: 255, g: 94, b: 77 }, alpha: 1 },
-        { pos: 0.5, color: { r: 255, g: 175, b: 64 }, alpha: 1 },
-        { pos: 1, color: { r: 66, g: 39, b: 90 }, alpha: 1 },
-      ];
-    default:
-      return [{ pos: 0, color: fg, alpha: 1 }, { pos: 1, color: bg, alpha: 1 }];
-  }
+  return resolveStops(sortStops(gradientById(preset).stops), fg, bg);
 }
 
 const stopCss = (s: GradientStop): string => `rgba(${s.color.r},${s.color.g},${s.color.b},${s.alpha})`;
