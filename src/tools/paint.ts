@@ -8,6 +8,9 @@ import { luminance, type RGB } from '../core/color';
 import { gaussianBlur } from '../filters/blur';
 import { convolve } from '../filters/effects';
 import { brushStamp, Stroke, type BrushSettings } from './stroke';
+import {
+  cachedPatternSurface, loadPatterns, tileInto, warmPatterns,
+} from '../core/patterns';
 import type { Tool, ToolOption, ToolPointer } from './types';
 
 const sizeOpt = (def = 30): ToolOption =>
@@ -521,6 +524,94 @@ export class HistoryBrushTool implements Tool {
 
   cancel(app: App): void {
     if (this.ds) { this.ds.abort(); this.ds = null; app.changed(); }
+  }
+}
+
+/** Choices for the pattern stamp, rebuilt when the user defines one. */
+export const PATTERN_OPTIONS: { value: string; label: string }[] = [];
+
+export function refreshPatternOptions(): void {
+  PATTERN_OPTIONS.length = 0;
+  for (const p of loadPatterns()) PATTERN_OPTIONS.push({ value: p.id, label: p.name });
+  warmPatterns();
+}
+refreshPatternOptions();
+
+/**
+ * Paints a tiled pattern through the brush. The tile is anchored to the
+ * document, not the stroke, so separate strokes line up into one surface.
+ */
+export class PatternStampTool implements Tool {
+  id = 'pattern-stamp';
+  name = '圖樣印章工具';
+  shortcut = '';
+  icon = 'grid';
+  group = 'retouch';
+  showBrushCursor = true;
+  options: ToolOption[] = [
+    sizeOpt(60), hardnessOpt(70), opacityOpt(), flowOpt(),
+    { key: 'pattern', label: '圖樣', type: 'select', default: 'checker', options: PATTERN_OPTIONS },
+    { key: 'scale', label: '縮放', type: 'slider', min: 10, max: 400, step: 5, default: 100, unit: '%' },
+  ];
+
+  private ds: DirectStroke | null = null;
+  private tiled: Surface | null = null;
+
+  down(e: ToolPointer): void {
+    const target = e.doc.paintTarget();
+    if (!target) { e.app.toast(e.doc.paintBlockReason() ?? '此圖層無法編輯', 'error'); return; }
+
+    const o = e.app.toolOptions[this.id] ?? {};
+    const pattern = loadPatterns().find((p) => p.id === String(o.pattern ?? 'checker'));
+    if (!pattern) { e.app.toast('找不到這個圖樣', 'error'); return; }
+
+    const radius = Math.max(1, Number(o.size ?? 60) / 2);
+    const hardness = Number(o.hardness ?? 70) / 100;
+    const alpha = (Number(o.opacity ?? 100) / 100) * (Number(o.flow ?? 100) / 100);
+
+    const tile = cachedPatternSurface(pattern);
+    if (!tile) {
+      // Only a stored pattern that has not finished decoding lands here.
+      warmPatterns();
+      e.app.toast('圖樣還在載入，請再試一次', 'error');
+      return;
+    }
+    // One tiled surface per stroke; the brush only reveals parts of it.
+    const tiled = createSurface(target.surface.w, target.surface.h);
+    tileInto(tiled, tile, Number(o.scale ?? 100), target.offX, target.offY);
+    this.tiled = tiled;
+
+    this.ds = new DirectStroke(
+      e.doc, target.layer, target.surface, target.slot, Math.max(1, radius * 0.2),
+      (work, x, y, r) => {
+        const reg = patchRegion(work, x, y, r);
+        if (!reg || !this.tiled) return;
+        const patch = createSurface(reg.w, reg.h);
+        patch.ctx.drawImage(this.tiled.canvas, -reg.px, -reg.py);
+        this.ds!.applyPatch(patch, reg.px, reg.py, r, hardness, alpha);
+      },
+    );
+    this.ds.begin(e.x, e.y, e.pressure, e, radius);
+    e.app.changed();
+  }
+
+  move(e: ToolPointer): void {
+    if (!this.ds) return;
+    const radius = Math.max(1, Number(e.app.toolOptions[this.id]?.size ?? 60) / 2);
+    this.ds.extend(e.x, e.y, e.pressure, e, radius);
+    e.app.changed();
+  }
+
+  up(e: ToolPointer): void {
+    if (!this.ds) return;
+    this.ds.commit('圖樣印章');
+    this.ds = null;
+    this.tiled = null;
+    e.app.changed();
+  }
+
+  cancel(app: App): void {
+    if (this.ds) { this.ds.abort(); this.ds = null; this.tiled = null; app.changed(); }
   }
 }
 

@@ -64,6 +64,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       cmdEntry('edit.fillFg'),
       cmdEntry('edit.fillBg'),
       cmdEntry('edit.stroke'),
+      cmdEntry('edit.definePattern'),
       sep,
       cmdEntry('edit.transform'),
       sub('變形', [

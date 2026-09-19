@@ -160,6 +160,18 @@ contrast → shift` 的順序回傳新的遵罩（與 Photoshop 的調整邊緣�
 對話框（`ui/dialogs/refine.ts`）只負責預視與輸出：選取範圍、圖層遮色片或
 剪成新圖層。
 
+## 圖樣
+
+`core/patterns.ts` 的內建圖樣是繪圖函式，需要時才畫成磁磚；使用者定義的
+則以 PNG data URL 存在 localStorage。
+
+- 解碼 data URL 是**非同步**的，而繪圖工具是同步的：`down()` 不能等 Promise，
+  否則第一筆刷過去時磁磚還是空的，整筆就白畫了。因此 `createPattern()` 會直接
+  把已經畫好的磁磚塞進快取，`warmPatterns()` 在啟動與定義後把儲存的圖樣預先
+  解碼，工具則只用同步的 `cachedPatternSurface()`。
+- `tileInto()` 的位移參數把磁磚相位錨定在**文件原點**而不是表面原點，
+  圖層有位移時兩次填滿才接得起來。
+
 ## 漸層
 
 `core/gradients.ts` 是漸層的註冊表：內建清單加上使用者存在 localStorage 的自訂漸層。

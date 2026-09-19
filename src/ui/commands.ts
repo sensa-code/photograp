@@ -6,6 +6,10 @@ import {
   findParent, flattenLayers, layerKindLabel,
 } from '../core/layer';
 import { layerBounds } from '../core/guides';
+import {
+  createPattern, loadPatterns, savePatterns, MAX_PATTERN,
+} from '../core/patterns';
+import { refreshPatternOptions } from '../tools/paint';
 import type { Rect } from '../core/geometry';
 import { renderShapeLayer, transformPathPoints } from '../core/shape';
 import { cloneSurface, createSurface, opaqueBounds } from '../core/surface';
@@ -19,7 +23,8 @@ import {
 } from '../io/files';
 import { transformTool, cropTool, getTool } from '../tools';
 import { renderTextLayer } from '../core/text';
-import { confirmDialog } from './modal';
+import { confirmDialog, openModal } from './modal';
+import { el } from './dom';
 import {
   aboutDialog, canvasSizeDialog, colorRangeDialog, exportDialog, fillDialog,
   imageSizeDialog, layerStyleDialog, modifySelectionDialog, newDocumentDialog,
@@ -302,6 +307,39 @@ function distributeLayers(app: App, axis: 'h' | 'v'): void {
   });
   if (!moved) { app.status('已經平均分佈了'); return; }
   doc.commit(axis === 'h' ? '水平平均分佈' : '垂直平均分佈');
+  app.changed();
+}
+
+/**
+ * Edit > Define Pattern: take the selection (or the whole layer) as a tile.
+ * The layer's own pixels are used rather than the composite, so a pattern
+ * picked off one layer does not pick up whatever sits behind it.
+ */
+async function definePattern(app: App): Promise<void> {
+  const doc = app.activeDoc();
+  const layer = doc?.activeLayer();
+  if (!doc || !layer?.surface) {
+    app.toast('請先選擇一個有像素的圖層', 'error');
+    return;
+  }
+  const b = doc.selection.bounds();
+  const x = b ? b.x - layer.x : 0;
+  const y = b ? b.y - layer.y : 0;
+  const w = b ? b.w : layer.surface.w;
+  const h = b ? b.h : layer.surface.h;
+  if (w < 1 || h < 1) { app.toast('選取範圍太小', 'error'); return; }
+  if (w > MAX_PATTERN || h > MAX_PATTERN) {
+    app.status(`圖樣最大為 ${MAX_PATTERN} px，超出的部分已裁掉`);
+  }
+
+  const input = el('input', { type: 'text', value: `圖樣 ${loadPatterns().length + 1}` }) as HTMLInputElement;
+  if (await openModal({ title: '定義圖樣', body: input, width: 320 }) !== 'ok') return;
+
+  const entry = createPattern(input.value.trim(), layer.surface, x, y, w, h);
+  savePatterns([...loadPatterns(), entry]);
+  refreshPatternOptions();
+  app.events.emit('options-changed', undefined);
+  app.status(`已定義圖樣「${entry.name}」（${entry.width} × ${entry.height} px）`);
   app.changed();
 }
 
@@ -603,6 +641,7 @@ export const COMMANDS: CmdType[] = [
   cmd('edit.paste', '貼上', (a) => pasteFromApp(a), { shortcut: 'Ctrl+V', enabled: hasDoc }),
   cmd('edit.clear', '清除', (a) => clearSelectionPixels(a, '清除'), { shortcut: 'Delete', enabled: canPaint }),
   cmd('edit.fill', '填滿…', (a) => fillDialog(a), { shortcut: 'Shift+F5', enabled: canPaint }),
+  cmd('edit.definePattern', '定義圖樣…', (a) => definePattern(a), { enabled: hasRaster }),
   cmd('edit.fillFg', '填入前景色', (a) => fillWith(a, 'foreground'), { shortcut: 'Alt+Backspace', enabled: canPaint }),
   cmd('edit.fillBg', '填入背景色', (a) => fillWith(a, 'background'), { shortcut: 'Ctrl+Backspace', enabled: canPaint }),
   cmd('edit.stroke', '筆畫…', (a) => strokeDialog(a), { enabled: canPaint }),

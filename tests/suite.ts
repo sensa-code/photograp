@@ -7,6 +7,10 @@ import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
 import type { Rect } from '../src/core/geometry';
 import {
+  BUILTIN_PATTERNS, cachedPatternSurface, createPattern, describePattern, forgetPattern,
+  loadPatterns, MAX_PATTERN, patternSurface, resetPatterns, savePatterns, tileInto,
+} from '../src/core/patterns';
+import {
   defaultRefine, refineIsIdentity, refineMask, scaleMask,
 } from '../src/core/refine';
 import type { Layer } from '../src/core/types';
@@ -1483,6 +1487,137 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- patterns ----
+  group('圖樣');
+  await test('內建圖樣都能畫出來', async () => {
+    assert(BUILTIN_PATTERNS.length >= 8, '內建圖樣數量');
+    for (const p of BUILTIN_PATTERNS) {
+      const tile = await patternSurface(p);
+      assert(tile.w === p.width && tile.h === p.height, `${p.name} 尺寸應相符`);
+      const d = tile.ctx.getImageData(0, 0, tile.w, tile.h).data;
+      let opaque = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] > 0) opaque++;
+      assert(opaque === tile.w * tile.h, `${p.name} 應是不透明的磁磚`);
+    }
+  });
+  await test('棋盤格真的是棋盤格', async () => {
+    const tile = await patternSurface(BUILTIN_PATTERNS.find((p) => p.id === 'checker')!);
+    const a = pixel(tile, 4, 4);
+    const b = pixel(tile, 20, 4);
+    const c = pixel(tile, 20, 20);
+    assert(a[0] !== b[0], `相鄰方格應不同色，實得 ${a} vs ${b}`);
+    assert(a[0] === c[0], '對角方格應同色');
+  });
+  await test('雜訊圖樣每次都一樣', async () => {
+    const p = BUILTIN_PATTERNS.find((x) => x.id === 'noise')!;
+    const a = await patternSurface(p);
+    forgetPattern(p.id);
+    const b = await patternSurface(p);
+    assert(a !== b, '清除快取後應重新產生');
+    assert(pixel(a, 3, 7).join() === pixel(b, 3, 7).join(), '固定亂數序列應產生相同結果');
+  });
+  await test('tileInto 會鋪滿整張表面', async () => {
+    const tile = await patternSurface(BUILTIN_PATTERNS.find((p) => p.id === 'stripes')!);
+    const out = createSurface(100, 60);
+    tileInto(out, tile);
+    const d = out.ctx.getImageData(0, 0, 100, 60).data;
+    let opaque = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 250) opaque++;
+    assert(opaque === 100 * 60, `應完全鋪滿，實得 ${opaque}`);
+    // The stripe repeats every 32 px, so these two columns must match.
+    assert(pixel(out, 5, 30).join() === pixel(out, 37, 30).join(), '圖樣應每 32px 重複');
+  });
+  await test('縮放會改變重複間距', async () => {
+    const tile = await patternSurface(BUILTIN_PATTERNS.find((p) => p.id === 'stripes')!);
+    const out = createSurface(140, 20);
+    tileInto(out, tile, 50);
+    // At 50% the 32px tile becomes 16px, so the repeat is 16 px.
+    assert(pixel(out, 3, 10).join() === pixel(out, 19, 10).join(), '縮小後應每 16px 重複');
+    assert(pixel(out, 3, 10).join() !== pixel(out, 11, 10).join(), '同一磁磚內應有差異');
+  });
+  await test('位移讓圖樣錨定在文件原點', async () => {
+    const tile = await patternSurface(BUILTIN_PATTERNS.find((p) => p.id === 'stripes')!);
+    const whole = createSurface(64, 20);
+    tileInto(whole, tile);
+    // A surface standing 32 px to the right must line up with the full one.
+    const shifted = createSurface(32, 20);
+    tileInto(shifted, tile, 100, 32, 0);
+    assert(pixel(shifted, 5, 10).join() === pixel(whole, 37, 10).join(), '相同相位才能接得起來');
+  });
+  await test('定義圖樣會截下指定的區域', () => {
+    const src = createSurface(60, 60);
+    src.ctx.fillStyle = '#ff0000'; src.ctx.fillRect(0, 0, 60, 60);
+    src.ctx.fillStyle = '#00ff00'; src.ctx.fillRect(10, 10, 20, 20);
+    const p = createPattern('綠塊', src, 10, 10, 20, 20);
+    assert(p.width === 20 && p.height === 20, '尺寸應是裁切區域');
+    assert(p.data.startsWith('data:image/png'), '應存成 PNG data URL');
+    assert(!p.builtin, '自訂圖樣不是內建');
+    assert(describePattern(p) === '20 × 20 px', `描述有誤：${describePattern(p)}`);
+  });
+  await test('過大的區域會被限制在上限', () => {
+    const src = createSurface(700, 700);
+    src.ctx.fillStyle = '#123456'; src.ctx.fillRect(0, 0, 700, 700);
+    const p = createPattern('大', src, 0, 0, 700, 700);
+    assert(p.width === MAX_PATTERN && p.height === MAX_PATTERN, `應裁到 ${MAX_PATTERN}`);
+  });
+  await test('自訂圖樣可以存起來再畫出來', async () => {
+    resetPatterns();
+    const src = createSurface(16, 16);
+    src.ctx.fillStyle = '#0033ff'; src.ctx.fillRect(0, 0, 16, 16);
+    src.ctx.fillStyle = '#ffcc00'; src.ctx.fillRect(0, 0, 8, 8);
+    const p = createPattern('測試圖樣', src);
+    savePatterns([...loadPatterns(), p]);
+
+    const back = loadPatterns().find((x) => x.name === '測試圖樣')!;
+    assert(back, '應載得回來');
+    assert(back.builtin !== true, '自訂圖樣不是內建');
+    const tile = await patternSurface(back);
+    assert(pixel(tile, 2, 2)[0] > 200, `左上應是黃的，實得 ${pixel(tile, 2, 2)}`);
+    assert(pixel(tile, 12, 12)[2] > 200, `右下應是藍的，實得 ${pixel(tile, 12, 12)}`);
+    resetPatterns();
+    assert(!loadPatterns().some((x) => x.name === '測試圖樣'), '恢復後應清掉自訂的');
+  });
+  await test('載入時會丟掉壞掉的資料', () => {
+    localStorage.setItem('photograp.patterns.v1', JSON.stringify({
+      user: [
+        { id: 'a', name: '寬高缺失', data: 'data:image/png;base64,xx', width: 0, height: 0 },
+        { id: 'b', name: '沒有資料', width: 8, height: 8 },
+      ],
+    }));
+    const back = loadPatterns();
+    assert(back.every((x) => x.builtin), '兩筆壞資料都應被丟掉');
+    resetPatterns();
+  });
+  await test('剛定義的圖樣馬上就能同步取用', () => {
+    // Tools paint synchronously, so a pattern that still had to decode from
+    // its data URL would paint nothing at all on the first stroke.
+    const src = createSurface(12, 12);
+    src.ctx.fillStyle = '#ff8800';
+    src.ctx.fillRect(0, 0, 12, 12);
+    const p = createPattern('即時', src);
+    const tile = cachedPatternSurface(p);
+    assert(tile, '定義完應立刻拿得到磁磚');
+    assert(pixel(tile!, 6, 6)[0] > 200, '磁磚內容應正確');
+    assert(cachedPatternSurface(BUILTIN_PATTERNS[0]), '內建圖樣也應是同步的');
+    forgetPattern(p.id);
+    assert(cachedPatternSurface(p) === null, '清除快取後應回傳 null 而不是白磁磚');
+  });
+  await test('圖樣印章只刷在刷過的地方', () => {
+    const doc = PhotoDoc.createBlank('stamp', 64, 64, 'white');
+    app.docs.length = 0;
+    app.addDoc(doc);
+    const tool = TOOLS.find((t) => t.id === 'pattern-stamp')!;
+    app.options(tool.id, {
+      ...optionDefaults(tool), size: 24, hardness: 100, pattern: 'checker',
+    });
+    tool.down(pointer(doc, 32, 32));
+    tool.up(pointer(doc, 32, 32));
+    const layer = doc.layers[0];
+    assert(doc.history.snapshots.some((h) => h.label === '圖樣印章'), '應記下一筆步驟');
+    assert(pixel(layer.surface!, 2, 2)[0] === 255
+      && pixel(layer.surface!, 2, 2)[1] === 255, '沒刷到的地方應還是白底');
   });
 
   // ---- selective colour and shadows/highlights ----

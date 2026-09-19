@@ -4,6 +4,7 @@ import { createSurface } from '../../core/surface';
 import { rgbCss, type RGB } from '../../core/color';
 import { clamp } from '../../core/geometry';
 import { exportDocument, type ExportFormat } from '../../io/files';
+import { loadPatterns, patternSurface, tileInto } from '../../core/patterns';
 import { el, on } from '../dom';
 import {
   checkboxControl, colorChip, formGrid, numberControl, openModal,
@@ -212,6 +213,33 @@ export async function fillDialog(app: App): Promise<void> {
   let source = 'foreground';
   let custom: RGB = { ...app.foreground };
   let opacity = 100;
+  const patterns = loadPatterns();
+  let patternId = patterns[0].id;
+  let patternScale = 100;
+
+  const swatch = el('canvas', {
+    width: 44, height: 28, style: 'border:1px solid var(--line);border-radius:3px',
+  }) as HTMLCanvasElement;
+  const paintSwatch = (): void => {
+    const p = patterns.find((x) => x.id === patternId);
+    if (!p) return;
+    void patternSurface(p).then((tile) => {
+      const s = createSurface(44, 28);
+      tileInto(s, tile, patternScale);
+      const ctx = swatch.getContext('2d')!;
+      ctx.clearRect(0, 0, 44, 28);
+      ctx.drawImage(s.canvas, 0, 0);
+    });
+  };
+  paintSwatch();
+
+  const patternRow = el('div', { style: 'display:flex;gap:6px;align-items:center' },
+    selectControl(patternId, patterns.map((p) => ({ value: p.id, label: p.name })), (v) => {
+      patternId = v;
+      source = 'pattern';
+      paintSwatch();
+    }),
+    swatch);
 
   const body = formGrid([
     ['使用', selectControl(source, [
@@ -221,23 +249,34 @@ export async function fillDialog(app: App): Promise<void> {
       { value: 'black', label: '黑色' },
       { value: 'white', label: '白色' },
       { value: 'gray', label: '50% 灰色' },
+      { value: 'pattern', label: '圖樣' },
     ], (v) => { source = v; })],
     ['自訂顏色', colorChip(custom, (c) => { custom = c; source = 'custom'; })],
+    ['圖樣', patternRow],
+    ['圖樣縮放', sliderControl(patternScale, 10, 400, 5, (v) => {
+      patternScale = v;
+      paintSwatch();
+    }, '%', 150)],
     ['不透明度', sliderControl(opacity, 1, 100, 1, (v) => { opacity = v; }, '%', 150)],
   ]);
 
   if (await openModal({ title: '填滿', body }) !== 'ok') return;
 
-  const color: RGB = source === 'foreground' ? app.foreground
-    : source === 'background' ? app.background
-      : source === 'black' ? { r: 0, g: 0, b: 0 }
-        : source === 'white' ? { r: 255, g: 255, b: 255 }
-          : source === 'gray' ? { r: 128, g: 128, b: 128 }
-            : custom;
-
   const paint = createSurface(doc.width, doc.height);
-  paint.ctx.fillStyle = rgbCss(color);
-  paint.ctx.fillRect(0, 0, paint.w, paint.h);
+  if (source === 'pattern') {
+    const p = patterns.find((x) => x.id === patternId);
+    if (!p) { app.toast('找不到這個圖樣', 'error'); return; }
+    tileInto(paint, await patternSurface(p), patternScale);
+  } else {
+    const color: RGB = source === 'foreground' ? app.foreground
+      : source === 'background' ? app.background
+        : source === 'black' ? { r: 0, g: 0, b: 0 }
+          : source === 'white' ? { r: 255, g: 255, b: 255 }
+            : source === 'gray' ? { r: 128, g: 128, b: 128 }
+              : custom;
+    paint.ctx.fillStyle = rgbCss(color);
+    paint.ctx.fillRect(0, 0, paint.w, paint.h);
+  }
   if (target.clipToSelection && doc.selection.active) {
     paint.ctx.globalCompositeOperation = 'destination-in';
     paint.ctx.drawImage(doc.selection.toSurface().canvas, 0, 0);
