@@ -1,4 +1,6 @@
-import type { AdjustmentSpec, CurveChannel, GradientStop } from '../core/types';
+import type {
+  AdjustmentSpec, ColorFamily, CurveChannel, GradientStop,
+} from '../core/types';
 import { hslToRgb, luminance, rgbToHsl, type RGB } from '../core/color';
 import { clamp } from '../core/geometry';
 
@@ -126,6 +128,70 @@ function toneWeights(v: number): [number, number, number] {
 }
 
 /** Apply an adjustment to an ImageData buffer, in place. */
+/**
+ * How strongly a pixel belongs to each Selective Color band. The six hue
+ * bands use a triangular window 60 degrees wide, so a colour sitting between
+ * two of them is shared between the pair and the weights still sum to one.
+ * Neutral bands are driven by how light or dark the pixel is instead.
+ */
+function familyWeight(
+  family: ColorFamily, r: number, g: number, b: number,
+): number {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  if (family === 'whites') return clamp((mn - 0.5) * 2, 0, 1);
+  if (family === 'blacks') return clamp((0.5 - mx) * 2, 0, 1);
+  if (family === 'neutrals') {
+    return clamp(1 - clamp((mn - 0.5) * 2, 0, 1) - clamp((0.5 - mx) * 2, 0, 1), 0, 1);
+  }
+
+  const chroma = mx - mn;
+  if (chroma <= 0) return 0;
+  let hue: number;
+  if (mx === r) hue = ((g - b) / chroma) % 6;
+  else if (mx === g) hue = (b - r) / chroma + 2;
+  else hue = (r - g) / chroma + 4;
+  hue *= 60;
+  if (hue < 0) hue += 360;
+
+  const centre = { reds: 0, yellows: 60, greens: 120, cyans: 180, blues: 240, magentas: 300 }[family];
+  let delta = Math.abs(hue - centre);
+  if (delta > 180) delta = 360 - delta;
+  // Scale by saturation so a nearly grey pixel is left to the neutral bands.
+  return clamp(1 - delta / 60, 0, 1) * (chroma / mx);
+}
+
+/** Selective Color for one pixel, in place on a 0..1 RGB triple. */
+function selectiveColorPixel(
+  rgb: [number, number, number], spec: Extract<AdjustmentSpec, { type: 'selective-color' }>,
+): void {
+  const [r, g, b] = rgb;
+  const w = familyWeight(spec.family, r, g, b);
+  if (w <= 0) return;
+
+  const k = 1 - Math.max(r, g, b);
+  const inv = 1 - k;
+  // A fully black pixel has no colour ink to scale, only black.
+  let c = inv > 1e-6 ? (1 - r - k) / inv : 0;
+  let m = inv > 1e-6 ? (1 - g - k) / inv : 0;
+  let y = inv > 1e-6 ? (1 - b - k) / inv : 0;
+  let kk = k;
+
+  const shift = (value: number, amount: number): number => {
+    const delta = (amount / 100) * w;
+    // Relative works on what is already there; absolute adds a flat amount.
+    return clamp(value + (spec.relative ? value * delta : delta), 0, 1);
+  };
+  c = shift(c, spec.cyan);
+  m = shift(m, spec.magenta);
+  y = shift(y, spec.yellow);
+  kk = shift(kk, spec.black);
+
+  const back = 1 - kk;
+  rgb[0] = clamp((1 - c) * back, 0, 1);
+  rgb[1] = clamp((1 - m) * back, 0, 1);
+  rgb[2] = clamp((1 - y) * back, 0, 1);
+}
+
 export function applyAdjustment(img: ImageData, spec: AdjustmentSpec): void {
   const d = img.data;
 
@@ -290,6 +356,71 @@ export function applyAdjustment(img: ImageData, spec: AdjustmentSpec): void {
       return;
     }
 
+    case 'selective-color': {
+      const rgb: [number, number, number] = [0, 0, 0];
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] === 0) continue;
+        rgb[0] = d[i] / 255; rgb[1] = d[i + 1] / 255; rgb[2] = d[i + 2] / 255;
+        selectiveColorPixel(rgb, spec);
+        d[i] = clamp255(rgb[0] * 255);
+        d[i + 1] = clamp255(rgb[1] * 255);
+        d[i + 2] = clamp255(rgb[2] * 255);
+      }
+      return;
+    }
+
+    case 'shadows-highlights': {
+      // Deliberately point-wise: every adjustment here has to give the same
+      // answer whether it runs on a whole composite, a smart filter, or just
+      // the bounding box of a selection, which a radius-based version could
+      // not do without seeing the pixels outside that box.
+      const sAmt = spec.shadowAmount / 100;
+      const hAmt = spec.highlightAmount / 100;
+      const sTone = Math.max(0.01, spec.shadowTone / 100);
+      const hTone = Math.max(0.01, spec.highlightTone / 100);
+      const contrast = spec.midtoneContrast / 100;
+      const colour = spec.colorCorrect / 100;
+
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] === 0) continue;
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const lum = luminance(r, g, b) / 255;
+
+        const sMask = clamp(1 - lum / sTone, 0, 1) ** 2;
+        const hMask = clamp((lum - (1 - hTone)) / hTone, 0, 1) ** 2;
+        // At full strength shadows roughly treble and highlights drop to a
+        // third, so the two sliders pull with about the same force.
+        let out = lum * (1 + sAmt * sMask * 2) * (1 - hAmt * hMask * 0.7);
+
+        // Midtone contrast is an S-curve about the middle grey.
+        if (contrast !== 0) {
+          const t = clamp(out, 0, 1);
+          const s = t * t * (3 - 2 * t);
+          out = t + (s - t) * contrast;
+        }
+        out = clamp(out, 0, 1);
+
+        // Scaling keeps the black point: a pixel with no light in it has no
+        // shadow detail to recover, while near-black pixels are pulled apart
+        // enough to bring their detail back without washing the blacks out.
+        const ratio = lum > 0 ? out / lum : 1;
+        let nr = r * ratio, ng = g * ratio, nb = b * ratio;
+
+        if (colour !== 0) {
+          const touched = clamp(sMask + hMask, 0, 1);
+          const nl = luminance(nr, ng, nb);
+          const k = 1 + colour * touched;
+          nr = nl + (nr - nl) * k;
+          ng = nl + (ng - nl) * k;
+          nb = nl + (nb - nl) * k;
+        }
+        d[i] = clamp255(nr);
+        d[i + 1] = clamp255(ng);
+        d[i + 2] = clamp255(nb);
+      }
+      return;
+    }
+
     case 'invert': {
       for (let i = 0; i < d.length; i += 4) {
         d[i] = 255 - d[i]; d[i + 1] = 255 - d[i + 1]; d[i + 2] = 255 - d[i + 2];
@@ -383,9 +514,23 @@ export const ADJUSTMENT_LABELS: Record<AdjustmentSpec['type'], string> = {
   'photo-filter': '相片濾鏡',
   'gradient-map': '漸層對應',
   'channel-mixer': '色版混合器',
+  'selective-color': '選取顏色',
+  'shadows-highlights': '陰影/亮部',
 };
 
-export function defaultAdjustment(type: AdjustmentSpec['type']): AdjustmentSpec {
+/**
+ * Fresh parameters for one adjustment. Generic so a literal type argument
+ * narrows the result, which lets callers reach the variant's own fields.
+ */
+export function defaultAdjustment<T extends AdjustmentSpec['type']>(
+  type: T,
+): Extract<AdjustmentSpec, { type: T }> {
+  // The switch below returns exactly the variant named by `type`, which
+  // TypeScript cannot follow through the generic parameter.
+  return defaultSpec(type) as Extract<AdjustmentSpec, { type: T }>;
+}
+
+function defaultSpec(type: AdjustmentSpec['type']): AdjustmentSpec {
   switch (type) {
     case 'brightness-contrast': return { type, brightness: 0, contrast: 0, legacy: false };
     case 'levels': return { type, channel: 'rgb', inBlack: 0, inWhite: 255, gamma: 1, outBlack: 0, outWhite: 255 };
@@ -419,6 +564,13 @@ export function defaultAdjustment(type: AdjustmentSpec['type']): AdjustmentSpec 
     };
     case 'channel-mixer': return {
       type, matrix: [100, 0, 0, 0, 0, 100, 0, 0, 0, 0, 100, 0], monochrome: false,
+    };
+    case 'selective-color': return {
+      type, family: 'reds', cyan: 0, magenta: 0, yellow: 0, black: 0, relative: true,
+    };
+    case 'shadows-highlights': return {
+      type, shadowAmount: 35, shadowTone: 50, highlightAmount: 0, highlightTone: 50,
+      midtoneContrast: 0, colorCorrect: 20,
     };
   }
 }

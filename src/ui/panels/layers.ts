@@ -170,7 +170,8 @@ export class LayersPanel {
       popupMenu(adjustBtn, [
         'brightness-contrast', 'levels', 'curves', 'exposure', 'vibrance',
         'hue-saturation', 'color-balance', 'black-white', 'photo-filter',
-        'gradient-map', 'invert', 'posterize', 'threshold',
+        'selective-color', 'shadows-highlights', 'gradient-map',
+        'invert', 'posterize', 'threshold',
       ].map((t) => cmdEntry(`adjustLayer.${t}`)), this.app);
     });
 

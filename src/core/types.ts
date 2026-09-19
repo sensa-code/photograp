@@ -69,7 +69,25 @@ export type AdjustmentSpec =
   | { type: 'posterize'; levels: number }
   | { type: 'photo-filter'; color: RGB; density: number; preserveLuminosity: boolean }
   | { type: 'gradient-map'; stops: GradientStop[] }
-  | { type: 'channel-mixer'; matrix: number[]; monochrome: boolean };
+  | { type: 'channel-mixer'; matrix: number[]; monochrome: boolean }
+  | {
+      type: 'selective-color'; family: ColorFamily;
+      /** Cyan, magenta, yellow and black shifts, each -100..100. */
+      cyan: number; magenta: number; yellow: number; black: number;
+      /** Relative scales the existing ink; absolute adds a flat amount. */
+      relative: boolean;
+    }
+  | {
+      type: 'shadows-highlights';
+      shadowAmount: number; shadowTone: number;
+      highlightAmount: number; highlightTone: number;
+      midtoneContrast: number; colorCorrect: number;
+    };
+
+/** The nine bands Selective Color works on, as in Photoshop. */
+export type ColorFamily =
+  | 'reds' | 'yellows' | 'greens' | 'cyans' | 'blues' | 'magentas'
+  | 'whites' | 'neutrals' | 'blacks';
 
 export type AdjustmentType = AdjustmentSpec['type'];
 

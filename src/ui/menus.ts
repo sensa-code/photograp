@@ -14,7 +14,8 @@ const sub = (label: string, items: MenuEntry[]): MenuEntry => ({ kind: 'sub', la
 const ADJUST_ORDER: AdjustmentSpec['type'][] = [
   'brightness-contrast', 'levels', 'curves', 'exposure',
   'vibrance', 'hue-saturation', 'color-balance', 'black-white',
-  'photo-filter', 'channel-mixer', 'gradient-map',
+  'photo-filter', 'channel-mixer', 'selective-color', 'gradient-map',
+  'shadows-highlights',
   'invert', 'posterize', 'threshold',
 ];
 

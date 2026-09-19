@@ -7,7 +7,7 @@ import { applyAdjustment, ADJUSTMENT_LABELS, defaultAdjustment } from '../../fil
 import { defaultParams, type FilterDef, type ParamValue } from '../../filters/registry';
 import { el, on } from '../dom';
 import {
-  checkboxControl, colorChip, openModal, selectControl, sliderControl,
+  checkboxControl, colorChip, openModal, segmentedControl, selectControl, sliderControl,
 } from '../modal';
 import { computeHistogram, CurveEditor, HistogramView, type HistogramData } from './widgets';
 import type { RGB } from '../../core/color';
@@ -288,6 +288,37 @@ export function adjustmentControls(
       wrap.append(checkboxControl('單色', spec.monochrome, (v) => { spec.monochrome = v; onChange(); }));
       break;
     }
+
+    case 'selective-color': {
+      wrap.append(row('顏色', selectControl(spec.family, [
+        { value: 'reds', label: '紅色' }, { value: 'yellows', label: '黃色' },
+        { value: 'greens', label: '綠色' }, { value: 'cyans', label: '青色' },
+        { value: 'blues', label: '藍色' }, { value: 'magentas', label: '洋紅' },
+        { value: 'whites', label: '白色' }, { value: 'neutrals', label: '中間調' },
+        { value: 'blacks', label: '黑色' },
+      ], (v) => { spec.family = v as typeof spec.family; onChange(); })));
+      slider('青色', spec.cyan, -100, 100, 1, (v) => { spec.cyan = v; }, '%');
+      slider('洋紅', spec.magenta, -100, 100, 1, (v) => { spec.magenta = v; }, '%');
+      slider('黃色', spec.yellow, -100, 100, 1, (v) => { spec.yellow = v; }, '%');
+      slider('黑色', spec.black, -100, 100, 1, (v) => { spec.black = v; }, '%');
+      wrap.append(row('方式', segmentedControl(spec.relative ? 'relative' : 'absolute', [
+        { value: 'relative', label: '相對' },
+        { value: 'absolute', label: '絕對' },
+      ], (v) => { spec.relative = v === 'relative'; onChange(); })));
+      break;
+    }
+
+    case 'shadows-highlights':
+      wrap.append(el('div', { class: 'hint', text: '陰影' }));
+      slider('量', spec.shadowAmount, 0, 100, 1, (v) => { spec.shadowAmount = v; }, '%');
+      slider('色調範圍', spec.shadowTone, 1, 100, 1, (v) => { spec.shadowTone = v; }, '%');
+      wrap.append(el('div', { class: 'hint', text: '亮部' }));
+      slider('量 ', spec.highlightAmount, 0, 100, 1, (v) => { spec.highlightAmount = v; }, '%');
+      slider('色調範圍 ', spec.highlightTone, 1, 100, 1, (v) => { spec.highlightTone = v; }, '%');
+      wrap.append(el('div', { class: 'hint', text: '調整' }));
+      slider('中間調對比', spec.midtoneContrast, -100, 100, 1, (v) => { spec.midtoneContrast = v; }, '%');
+      slider('顏色校正', spec.colorCorrect, -100, 100, 1, (v) => { spec.colorCorrect = v; }, '%');
+      break;
 
     case 'invert':
       wrap.append(el('div', { class: 'hint', text: '將所有色版反轉。' }));

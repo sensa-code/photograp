@@ -14,7 +14,9 @@ import { compositeLayers } from '../src/core/compositor';
 import { createAdjustmentLayer, createRasterLayer, duplicateLayer } from '../src/core/layer';
 import { maskAlpha, maskFromCoverage, coverageFromMask } from '../src/core/mask';
 import { PhotoDoc } from '../src/core/document';
-import { applyAdjustment, curveLut, defaultAdjustment } from '../src/filters/adjustments';
+import {
+  ADJUSTMENT_LABELS, applyAdjustment, curveLut, defaultAdjustment,
+} from '../src/filters/adjustments';
 import { gaussianBlur, unsharpMask } from '../src/filters/blur';
 import { pixelate, findEdges } from '../src/filters/effects';
 import { getFilter, defaultParams } from '../src/filters/registry';
@@ -1481,6 +1483,179 @@ async function run(): Promise<void> {
     const out = doc.activeLayer()!.surface!;
     assert(pixel(out, 40, 40)[3] > 200, '筆觸中線應有顏色');
     assert(pixel(out, 40, 52)[3] < 40, `扁筆尖不應畫到 12px 外，實得 ${pixel(out, 40, 52)[3]}`);
+  });
+
+  // ---- selective colour and shadows/highlights ----
+  group('選取顏色');
+  /** One pixel through an adjustment, as an [r, g, b] triple. */
+  const adjustPixel = (
+    rgb: [number, number, number], spec: Parameters<typeof applyAdjustment>[1],
+  ): number[] => {
+    const img = new ImageData(1, 1);
+    img.data[0] = rgb[0]; img.data[1] = rgb[1]; img.data[2] = rgb[2]; img.data[3] = 255;
+    applyAdjustment(img, spec);
+    return [img.data[0], img.data[1], img.data[2]];
+  };
+
+  await test('預設設定不改變像素', () => {
+    const spec = defaultAdjustment('selective-color');
+    for (const c of [[200, 40, 40], [40, 200, 40], [128, 128, 128], [0, 0, 0], [255, 255, 255]]) {
+      const out = adjustPixel(c as [number, number, number], spec);
+      for (let i = 0; i < 3; i++) near(out[i], c[i], 1.5, `預設不應改變 ${c}`);
+    }
+  });
+  await test('只影響選到的顏色家族', () => {
+    const spec = {
+      ...defaultAdjustment('selective-color'),
+      family: 'reds' as const, cyan: 60, relative: false,
+    };
+    const red = adjustPixel([220, 30, 30], spec);
+    const green = adjustPixel([30, 220, 30], spec);
+    assert(red[0] < 200, `紅色應被加青而變暗，實得 ${red}`);
+    near(green[0], 30, 2, '綠色不應受影響');
+    near(green[1], 220, 2, '綠色不應受影響');
+  });
+  await test('相對方式加不進原本沒有的墓色', () => {
+    // Pure red holds no cyan ink, so a relative shift has nothing to scale —
+    // the same rule Photoshop states for specular white.
+    const spec = {
+      ...defaultAdjustment('selective-color'),
+      family: 'reds' as const, cyan: 60, relative: true,
+    };
+    const out = adjustPixel([255, 0, 0], spec);
+    near(out[0], 255, 1, '相對方式應不改變純紅');
+    const abs = adjustPixel([255, 0, 0], { ...spec, relative: false });
+    assert(abs[0] < 200, `絕對方式才能加進去，實得 ${abs}`);
+  });
+  await test('加黑會變暗，減黑會變亮', () => {
+    const base = { ...defaultAdjustment('selective-color'), family: 'blues' as const };
+    const darker = adjustPixel([40, 60, 220], { ...base, black: 50 });
+    const lighter = adjustPixel([40, 60, 220], { ...base, black: -50 });
+    assert(darker[2] < 220, `加黑後應變暗，實得 ${darker}`);
+    assert(lighter[2] >= 220, `減黑後不應變暗，實得 ${lighter}`);
+  });
+  await test('絕對方式比相對方式改得多', () => {
+    const rel = { ...defaultAdjustment('selective-color'), family: 'reds' as const, yellow: 40, relative: true };
+    const abs = { ...rel, relative: false };
+    const a = adjustPixel([220, 120, 120], rel);
+    const b = adjustPixel([220, 120, 120], abs);
+    const shift = (o: number[]): number => Math.abs(o[2] - 120);
+    assert(shift(b) > shift(a), `絕對方式應更明顯，實得 ${a} vs ${b}`);
+  });
+  await test('中性色家族只碰灰階', () => {
+    const spec = { ...defaultAdjustment('selective-color'), family: 'neutrals' as const, black: 40 };
+    const grey = adjustPixel([128, 128, 128], spec);
+    const vivid = adjustPixel([250, 20, 20], spec);
+    assert(grey[0] < 125, `中間灰應變暗，實得 ${grey}`);
+    near(vivid[0], 250, 3, '鮮豔的紅不應被中性色動到');
+  });
+  await test('白色與黑色家族分別認得亮部與暗部', () => {
+    const white = { ...defaultAdjustment('selective-color'), family: 'whites' as const, black: 30 };
+    const black = { ...defaultAdjustment('selective-color'), family: 'blacks' as const, black: -30 };
+    const bright = adjustPixel([245, 245, 245], white);
+    const dark = adjustPixel([20, 20, 20], white);
+    assert(bright[0] < 245, `亮部應被加黑，實得 ${bright}`);
+    near(dark[0], 20, 2, '暗部不應被白色家族動到');
+    const lifted = adjustPixel([20, 20, 20], black);
+    assert(lifted[0] > 20, `黑色家族減黑應提亮，實得 ${lifted}`);
+  });
+  await test('完全透明的像素不被碰', () => {
+    const img = new ImageData(1, 1);
+    img.data[0] = 200; img.data[1] = 30; img.data[2] = 30; img.data[3] = 0;
+    applyAdjustment(img, {
+      ...defaultAdjustment('selective-color'), family: 'reds', cyan: 80,
+    });
+    assert(img.data[0] === 200, '透明像素應保持原樣');
+  });
+
+  group('陰影亮部');
+  await test('提亮陰影不動亮部', () => {
+    const spec = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 60, highlightAmount: 0, colorCorrect: 0, midtoneContrast: 0,
+    };
+    const dark = adjustPixel([30, 30, 30], spec);
+    const bright = adjustPixel([240, 240, 240], spec);
+    assert(dark[0] > 45, `暗部應被提亮，實得 ${dark}`);
+    near(bright[0], 240, 3, `亮部應不變，實得 ${bright}`);
+  });
+  await test('壓低亮部不動陰影', () => {
+    const spec = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 0, highlightAmount: 70, colorCorrect: 0, midtoneContrast: 0,
+    };
+    const bright = adjustPixel([250, 250, 250], spec);
+    const dark = adjustPixel([30, 30, 30], spec);
+    assert(bright[0] < 230, `亮部應被壓低，實得 ${bright}`);
+    near(dark[0], 30, 3, `暗部應不變，實得 ${dark}`);
+  });
+  await test('色調範圍決定影響到多亮的區域', () => {
+    const narrow = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 60, shadowTone: 20, highlightAmount: 0, colorCorrect: 0, midtoneContrast: 0,
+    };
+    const wide = { ...narrow, shadowTone: 90 };
+    const mid = [110, 110, 110] as [number, number, number];
+    const a = adjustPixel(mid, narrow);
+    const b = adjustPixel(mid, wide);
+    near(a[0], 110, 3, '窄範圍不應碰到中間調');
+    assert(b[0] > 118, `寬範圍應把中間調也提亮，實得 ${b}`);
+  });
+  await test('全部歸零時影像不變', () => {
+    const spec = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 0, highlightAmount: 0, midtoneContrast: 0, colorCorrect: 0,
+    };
+    for (const c of [[0, 0, 0], [30, 90, 200], [128, 128, 128], [255, 255, 255]]) {
+      const out = adjustPixel(c as [number, number, number], spec);
+      for (let i = 0; i < 3; i++) near(out[i], c[i], 1.5, `不應改變 ${c}`);
+    }
+  });
+  await test('黑點保留，接近黑的細節被拉開', () => {
+    // A pixel with no light in it has no shadow detail to recover, so the
+    // black point stays put; the pixels just above it are pulled apart.
+    const spec = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 80, shadowTone: 60, highlightAmount: 0, colorCorrect: 0, midtoneContrast: 0,
+    };
+    assert(adjustPixel([0, 0, 0], spec)[0] === 0, '純黑應維持純黑');
+    const a = adjustPixel([4, 4, 4], spec)[0];
+    const b = adjustPixel([8, 8, 8], spec)[0];
+    assert(a > 4 && b > 8, `近黑應被提亮，實得 ${a} / ${b}`);
+    assert(b - a > 4, `近黑的差距應被拉開，實得 ${b - a}`);
+  });
+  await test('顏色校正會改變被動到區域的飽和度', () => {
+    const base = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 60, highlightAmount: 0, midtoneContrast: 0, colorCorrect: 0,
+    };
+    const plain = adjustPixel([40, 20, 20], base);
+    const saturated = adjustPixel([40, 20, 20], { ...base, colorCorrect: 80 });
+    const spread = (o: number[]): number => Math.max(...o) - Math.min(...o);
+    assert(spread(saturated) > spread(plain), `校正後應更鮮豔，實得 ${plain} vs ${saturated}`);
+  });
+  await test('中間調對比形成 S 形曲線', () => {
+    const spec = {
+      ...defaultAdjustment('shadows-highlights'),
+      shadowAmount: 0, highlightAmount: 0, colorCorrect: 0, midtoneContrast: 70,
+    };
+    const dark = adjustPixel([80, 80, 80], spec);
+    const light = adjustPixel([180, 180, 180], spec);
+    assert(dark[0] < 80, `中暗部應更暗，實得 ${dark}`);
+    assert(light[0] > 180, `中亮部應更亮，實得 ${light}`);
+    near(adjustPixel([128, 128, 128], spec)[0], 128, 3, '中間點應幾乎不動');
+  });
+  await test('兩種新調整都能當成調整圖層', () => {
+    const doc = PhotoDoc.createBlank('adj-layer', 20, 20, '#303030');
+    for (const type of ['selective-color', 'shadows-highlights'] as const) {
+      const layer = createAdjustmentLayer(ADJUSTMENT_LABELS[type], defaultAdjustment(type));
+      doc.layers.push(layer);
+      assert(layer.kind === 'adjustment', `${type} 應建立調整圖層`);
+    }
+    const out = doc.render();
+    assert(out.w === 20, '合成應成功');
+    const px = [...out.ctx.getImageData(10, 10, 1, 1).data];
+    assert(px[0] > 0x30, `預設的陰影亮部應把暗底拉亮，實得 ${px}`);
   });
 
   // ---- select and mask ----
