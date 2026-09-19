@@ -1,6 +1,8 @@
 import type { App } from '../core/app';
 import { rasterizePath, type SelectMode } from '../core/selection';
 import { normalizeRect, type Point } from '../core/geometry';
+import { snapPoint } from '../core/guides';
+import { clearSnapLines, showSnapLines, snapContextFor } from './snap';
 import type { Tool, ToolOption, ToolPointer, OverlayPaint } from './types';
 import type { PhotoDoc } from '../core/document';
 
@@ -116,18 +118,22 @@ export class MarqueeTool implements Tool {
   down(e: ToolPointer): void {
     this.dragging = true;
     this.fromCenter = false;
-    this.start = { x: e.x, y: e.y };
-    this.current = { x: e.x, y: e.y };
+    const snapped = snapPoint(e.x, e.y, snapContextFor(e, null));
+    this.start = { x: snapped.x, y: snapped.y };
+    this.current = { x: snapped.x, y: snapped.y };
   }
 
   move(e: ToolPointer): void {
     if (!this.dragging) return;
     this.fromCenter = e.alt && !e.shift;
-    this.current = { x: e.x, y: e.y };
+    const snapped = snapPoint(e.x, e.y, snapContextFor(e, null));
+    this.current = { x: snapped.x, y: snapped.y };
+    showSnapLines(e, snapped.lines);
     e.app.changed();
   }
 
   up(e: ToolPointer): void {
+    clearSnapLines(e);
     if (!this.dragging) return;
     this.dragging = false;
     const shape = String(e.app.toolOptions[this.id]?.shape ?? 'rect');

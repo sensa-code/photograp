@@ -9,6 +9,7 @@ import {
 } from './layer';
 import { compositeLayers, type CompositeOptions } from './compositor';
 import { clonePath, type VectorPath } from './path';
+import type { Guide } from './guides';
 import { renderChannelView, type AlphaChannel, type ChannelView } from './channels';
 import { renderSmartLayer } from './smart';
 import {
@@ -56,6 +57,9 @@ export class PhotoDoc {
   channels: AlphaChannel[] = [];
   /** Which channel the canvas shows; not part of the undo history. */
   channelView: ChannelView = 'rgb';
+  /** Ruler guides, in document coordinates. */
+  guides: Guide[] = [];
+  guidesLocked = false;
   /** Non-null while Quick Mask mode is on. */
   quickMask: QuickMask | null = null;
   /** In-progress edit of the quick mask, shown instead of the stored one. */
@@ -356,6 +360,10 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h);
+    this.guides = this.guides.map((g) => ({
+      ...g,
+      pos: g.axis === 'v' ? g.pos * sx : g.pos * sy,
+    }));
     this.resampleQuickMask(w, h, smooth);
     this.refreshSmartLayers();
   }
@@ -412,6 +420,9 @@ export class PhotoDoc {
     this.meta.width = w;
     this.meta.height = h;
     this.selection.resize(w, h, offsetX, offsetY);
+    this.guides = this.guides
+      .map((g) => ({ ...g, pos: g.pos + (g.axis === 'v' ? offsetX : offsetY) }))
+      .filter((g) => g.pos >= 0 && g.pos <= (g.axis === 'v' ? w : h));
     const qmSource = this.quickMask?.surface;
     if (qmSource) this.redrawQuickMask(w, h, (ctx) => ctx.drawImage(qmSource.canvas, offsetX, offsetY));
     this.refreshSmartLayers();

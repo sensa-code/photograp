@@ -175,6 +175,23 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       sep,
       cmdEntry('view.rulers'),
       cmdEntry('view.grid'),
+      cmdEntry('view.guides'),
+      sep,
+      cmdEntry('view.snap'),
+      sub('靠齊至', [
+        cmdEntry('view.snapGuides'),
+        cmdEntry('view.snapGrid'),
+        cmdEntry('view.snapDocument'),
+        cmdEntry('view.snapLayers'),
+      ]),
+      sep,
+      sub('參考線', [
+        cmdEntry('view.newGuide'),
+        cmdEntry('view.guidesFromSelection'),
+        cmdEntry('view.lockGuides'),
+        cmdEntry('view.clearGuides'),
+      ]),
+      cmdEntry('view.gridSize'),
     ],
   },
   {

@@ -3,6 +3,8 @@ import type { Layer } from '../core/types';
 import { cloneSurface, createSurface, type Surface } from '../core/surface';
 import { clamp, normalizeRect, type Rect } from '../core/geometry';
 import { luminance, type RGB } from '../core/color';
+import { layerBounds, snapRect } from '../core/guides';
+import { clearSnapLines, showSnapLines, snapContextFor } from './snap';
 import type { OverlayPaint, Tool, ToolOption, ToolPointer } from './types';
 
 export const ZOOM_STEPS = [
@@ -51,6 +53,8 @@ export class MoveTool implements Tool {
   private floatSurf: Surface | null = null;
   private preview: Surface | null = null;
   private delta = { x: 0, y: 0 };
+  /** Content bounds at drag start, used to snap edges and centres. */
+  private startBounds: Rect | null = null;
 
   private pickLayer(e: ToolPointer): Layer | null {
     const list = e.doc.layers;
@@ -76,6 +80,9 @@ export class MoveTool implements Tool {
     }
     this.layer = layer;
     this.delta = { x: 0, y: 0 };
+    this.startBounds = e.doc.selection.active && !e.doc.editingMask
+      ? e.doc.selection.bounds()
+      : layerBounds(layer);
 
     if (e.doc.selection.active && layer.surface && !e.doc.editingMask) {
       const sel = e.doc.selection.toSurface();
@@ -107,6 +114,23 @@ export class MoveTool implements Tool {
     }
     if (e.app.toolOptions[this.id]?.snap !== false) {
       dx = Math.round(dx); dy = Math.round(dy);
+    }
+
+    // Snap the moved content to guides, the grid, the canvas and other layers.
+    if (this.startBounds) {
+      const ctx = snapContextFor(e, this.layer.id);
+      const moved = {
+        x: this.startBounds.x + dx,
+        y: this.startBounds.y + dy,
+        w: this.startBounds.w,
+        h: this.startBounds.h,
+      };
+      const snapped = snapRect(moved, ctx);
+      dx += snapped.dx;
+      dy += snapped.dy;
+      showSnapLines(e, snapped.lines);
+    } else {
+      clearSnapLines(e);
     }
     this.delta = { x: dx, y: dy };
 
@@ -143,7 +167,9 @@ export class MoveTool implements Tool {
     }
     this.mode = 'none';
     this.layer = null;
+    this.startBounds = null;
     this.base = this.floatSurf = this.preview = null;
+    clearSnapLines(e);
     e.app.changed();
   }
 
@@ -156,7 +182,9 @@ export class MoveTool implements Tool {
     if (doc) { doc.livePreview = null; doc.touch(); }
     this.mode = 'none';
     this.layer = null;
+    this.startBounds = null;
     this.base = this.floatSurf = this.preview = null;
+    app.snapLines = null;
     app.changed();
   }
 }
@@ -370,6 +398,7 @@ export class CropTool implements Tool {
 
   move(e: ToolPointer): void {
     if (!this.dragMode || !this.startRect) return;
+    const snapCtx = snapContextFor(e, null);
     const dx = e.x - this.startPt.x, dy = e.y - this.startPt.y;
     const s = this.startRect;
     let r: Rect;
@@ -390,11 +419,23 @@ export class CropTool implements Tool {
         if (this.dragMode.includes('n')) r.y = y1 - r.h;
       }
     }
+    const snapped = snapRect(r, snapCtx);
+    if (this.dragMode === 'inside') {
+      r = { ...r, x: r.x + snapped.dx, y: r.y + snapped.dy };
+    } else {
+      // Only the edges being dragged move onto the snap lines.
+      if (this.dragMode.includes('w')) r = { ...r, x: r.x + snapped.dx, w: r.w - snapped.dx };
+      else if (this.dragMode.includes('e')) r = { ...r, w: r.w + snapped.dx };
+      if (this.dragMode.includes('n')) r = { ...r, y: r.y + snapped.dy, h: r.h - snapped.dy };
+      else if (this.dragMode.includes('s')) r = { ...r, h: r.h + snapped.dy };
+    }
+    showSnapLines(e, snapped.lines);
     this.rect = r;
     e.app.changed();
   }
 
   up(e: ToolPointer): void {
+    clearSnapLines(e);
     this.dragMode = null;
     if (this.rect && (this.rect.w < 2 || this.rect.h < 2)) this.rect = null;
     e.app.changed();

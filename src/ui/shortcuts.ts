@@ -52,6 +52,9 @@ export function installShortcuts(
   map.set('ctrl++', 'view.zoomIn');
   map.set('ctrl+-', 'view.zoomOut');
   map.set('ctrl+0', 'view.fit');
+  // Shift turns ";" into ":" on most layouts.
+  map.set('ctrl+shift+:', 'view.snap');
+  map.set('alt+ctrl+:', 'view.lockGuides');
 
   window.addEventListener('keydown', (ev) => {
     if (modalOpen()) return;

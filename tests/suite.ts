@@ -31,6 +31,10 @@ import {
 import { createSmartObject, renderSmartLayer, smartBounds, smartFilterEntry } from '../src/core/smart';
 import { quickMaskCoverage, renderQuickMaskOverlay } from '../src/core/quickmask';
 import { WarpMesh, warpImage, composeWarpWithSelection } from '../src/filters/liquify';
+import {
+  collectSnapTargets, createGuide, defaultSnapSettings, guideAt, layerBounds,
+  snapGroup, snapPoint, snapRect, snapScalar,
+} from '../src/core/guides';
 
 interface Case { name: string; error?: string }
 const groups: { name: string; cases: Case[] }[] = [];
@@ -1020,6 +1024,124 @@ async function run(): Promise<void> {
     one.sample(44, 32, a);
     many.sample(44, 32, b);
     assert(Math.hypot(b[0], b[1]) > Math.hypot(a[0], a[1]) * 2, '多次扭轉應明顯大於單次');
+  });
+
+  // ---- guides and snapping ----
+  group('參考線與靠齊');
+  await test('參考線命中測試依方向判斷距離', () => {
+    const guides = [createGuide('v', 100), createGuide('h', 40)];
+    assert(guideAt(guides, 102, 300, 5)?.axis === 'v', '應命中垂直參考線');
+    assert(guideAt(guides, 300, 38, 5)?.axis === 'h', '應命中水平參考線');
+    assert(guideAt(guides, 300, 300, 5) === null, '遠處不應命中');
+  });
+  await test('靠齊候選包含文件、參考線與圖層', () => {
+    const layer = createRasterLayer('box', 200, 100);
+    layer.surface!.ctx.fillStyle = '#fff';
+    layer.surface!.ctx.fillRect(20, 10, 40, 30);
+    const ctx = collectSnapTargets(
+      { width: 200, height: 100, guides: [createGuide('v', 77)], layers: [layer] },
+      defaultSnapSettings(), 8, 50,
+    );
+    for (const v of [0, 100, 200]) assert(ctx.x.includes(v), `應包含文件 X 候選 ${v}`);
+    assert(ctx.x.includes(77), '應包含垂直參考線');
+    for (const v of [20, 40, 60]) assert(ctx.x.includes(v), `應包含圖層 X 候選 ${v}`);
+    for (const v of [10, 25, 40]) assert(ctx.y.includes(v), `應包含圖層 Y 候選 ${v}`);
+    assert(ctx.grid === null, '預設不靠齊格點');
+  });
+  await test('關閉靠齊時沒有候選', () => {
+    const s = { ...defaultSnapSettings(), enabled: false };
+    const ctx = collectSnapTargets({ width: 100, height: 100, guides: [], layers: [] }, s, 8, 50);
+    assert(ctx.x.length === 0 && ctx.y.length === 0 && ctx.threshold === 0, '應為空的靠齊環境');
+  });
+  await test('拖曳中的圖層不會靠齊到自己', () => {
+    const layer = createRasterLayer('self', 100, 100);
+    layer.surface!.ctx.fillStyle = '#fff';
+    layer.surface!.ctx.fillRect(10, 10, 20, 20);
+    const ctx = collectSnapTargets(
+      { width: 100, height: 100, guides: [], layers: [layer] },
+      { ...defaultSnapSettings(), toDocument: false }, 8, 50, layer.id,
+    );
+    assert(ctx.x.length === 0, '排除的圖層不應提供候選');
+  });
+  await test('只在容許範圍內才靠齊', () => {
+    const ctx = { x: [100], y: [], grid: null, threshold: 8 };
+    const near = snapScalar(104, 'x', ctx);
+    assert(near.line === 100 && near.delta === -4, `應靠齊到 100，實得 ${JSON.stringify(near)}`);
+    const far = snapScalar(120, 'x', ctx);
+    assert(far.line === null && far.delta === 0, '超出容許範圍不應靠齊');
+  });
+  await test('格點靠齊會取最近的倍數', () => {
+    const ctx = { x: [], y: [], grid: 50, threshold: 8 };
+    const r = snapScalar(103, 'x', ctx);
+    assert(r.line === 100 && r.delta === -3, `應靠齊到 100，實得 ${JSON.stringify(r)}`);
+    assert(snapScalar(130, 'x', ctx).line === null, '距離太遠不應靠齊');
+  });
+  await test('群組靠齊挑選最小的調整量', () => {
+    const ctx = { x: [200], y: [], grid: null, threshold: 8 };
+    // Left edge is 7 away, right edge only 3; the right edge should win.
+    const r = snapGroup([193, 197], 'x', ctx);
+    near(r.delta, 3, 0.001, '應採用右緣的較小調整量');
+  });
+  await test('矩形靠齊會回報命中的線', () => {
+    const ctx = { x: [100], y: [60], grid: null, threshold: 8 };
+    const r = snapRect({ x: 94, y: 100, w: 40, h: 20 }, ctx);
+    near(r.dx, 6, 0.001, '左緣應貼到 100');
+    assert(r.lines.x[0] === 100, '應回報垂直線');
+    // The rect's centre at y=110 is nowhere near 60, so no vertical snap.
+    assert(r.dy === 0 && r.lines.y.length === 0, '沒有命中時不應調整');
+  });
+  await test('點靠齊會同時處理兩軸', () => {
+    const ctx = { x: [50], y: [80], grid: null, threshold: 8 };
+    const r = snapPoint(53, 76, ctx);
+    assert(r.x === 50 && r.y === 80, `兩軸都應靠齊，實得 ${r.x},${r.y}`);
+    assert(r.lines.x[0] === 50 && r.lines.y[0] === 80, '應回報兩條線');
+  });
+  await test('圖層邊界包含位移', () => {
+    const layer = createRasterLayer('b', 100, 100);
+    layer.surface!.ctx.fillStyle = '#fff';
+    layer.surface!.ctx.fillRect(10, 20, 30, 40);
+    layer.x = 5;
+    layer.y = 7;
+    const b = layerBounds(layer)!;
+    assert(b.x === 15 && b.y === 27 && b.w === 30 && b.h === 40, `邊界不正確：${JSON.stringify(b)}`);
+    assert(layerBounds(createRasterLayer('empty', 10, 10)) === null, '空圖層應回傳 null');
+  });
+  await test('版面尺寸改變時參考線跟著位移', () => {
+    const d = PhotoDoc.createBlank('t', 100, 100, 'white');
+    d.guides.push(createGuide('v', 30), createGuide('h', 40));
+    d.resizeCanvas(140, 100, 20, 0);
+    assert(d.guides[0].pos === 50, `垂直參考線應位移到 50，實得 ${d.guides[0].pos}`);
+    assert(d.guides[1].pos === 40, '水平參考線不應變動');
+  });
+  await test('版面縮小時超出範圍的參考線會被移除', () => {
+    const d = PhotoDoc.createBlank('t', 100, 100, 'white');
+    d.guides.push(createGuide('v', 90));
+    d.resizeCanvas(50, 100, 0, 0);
+    assert(d.guides.length === 0, '落在版面外的參考線應被移除');
+  });
+  await test('影像尺寸改變時參考線等比例縮放', () => {
+    const d = PhotoDoc.createBlank('t', 100, 100, 'white');
+    d.guides.push(createGuide('v', 25));
+    d.resampleTo(200, 200, true);
+    assert(d.guides[0].pos === 50, `參考線應縮放到 50，實得 ${d.guides[0].pos}`);
+  });
+  await test('步驟記錄與專案檔保留參考線', async () => {
+    const d = PhotoDoc.createBlank('t', 60, 40, 'white');
+    d.commit('base');
+    d.guides.push(createGuide('v', 12), createGuide('h', 8));
+    d.guidesLocked = true;
+    d.commit('參考線');
+    // Read through a function so the assertions do not narrow the length type.
+    const state = (): { n: number; locked: boolean } => ({ n: d.guides.length, locked: d.guidesLocked });
+    assert(d.undo(), '應可還原');
+    assert(state().n === 0 && !state().locked, '還原後應回到沒有參考線');
+    assert(d.redo(), '應可重做');
+    assert(state().n === 2 && state().locked, '重做後應恢復參考線與鎖定狀態');
+
+    const restored = await loadProject(serializeDocument(d));
+    assert(restored.guides.length === 2, '專案檔應保留參考線');
+    assert(restored.guides[0].axis === 'v' && restored.guides[0].pos === 12, '參考線內容應一致');
+    assert(restored.guidesLocked === true, '鎖定狀態應被保留');
   });
 
   // ---- tools smoke test ----

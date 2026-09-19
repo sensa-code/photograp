@@ -1,6 +1,7 @@
 import { Emitter } from './emitter';
 import { PhotoDoc } from './document';
 import type { RGB } from './color';
+import { defaultSnapSettings, type SnapLines, type SnapSettings } from './guides';
 
 export interface ViewState {
   zoom: number;
@@ -44,6 +45,12 @@ export class App {
   /** Per-tool option values, keyed by tool id. */
   toolOptions: Record<string, Record<string, unknown>> = {};
   private views = new Map<string, ViewState>();
+  /** Snapping preferences, shared by every document. */
+  snap: SnapSettings = defaultSnapSettings();
+  /** Spacing of the view grid, also used as the grid snap step. */
+  gridSize = 50;
+  /** Lines the current drag snapped to, drawn as guides-in-progress. */
+  snapLines: SnapLines | null = null;
   /** Clipboard holds a detached surface plus its origin in document space. */
   clipboard: { canvas: HTMLCanvasElement; x: number; y: number } | null = null;
 

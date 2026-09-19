@@ -7,6 +7,7 @@ import { rasterizePath } from '../core/selection';
 import { pathFromLoops, toPath2D, createPath, pathIsEmpty, anchorCount } from '../core/path';
 import { channelCoverage, createAlphaChannel } from '../core/channels';
 import { quickMaskCoverage } from '../core/quickmask';
+import { createGuide, type GuideAxis } from '../core/guides';
 import { createSmartObject, renderSmartLayer, replaceSmartSource, smartFilterEntry } from '../core/smart';
 import { rgbCss } from '../core/color';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
@@ -337,7 +338,93 @@ async function quickMaskOptionsDialog(app: App): Promise<void> {
   app.changed();
 }
 
+async function newGuideDialog(app: App): Promise<void> {
+  const d = doc(app);
+  if (!d) return;
+  let axis: GuideAxis = 'v';
+  let pos = Math.round(d.width / 2);
+  const body = formGrid([
+    ['方向', selectControl('v', [
+      { value: 'v', label: '垂直' },
+      { value: 'h', label: '水平' },
+    ], (v) => { axis = v as GuideAxis; })],
+    ['位置 (px)', numberControl(pos, 0, Math.max(d.width, d.height), 1, (v) => { pos = v; })],
+  ]);
+  if (await openModal({ title: '新增參考線', body }) !== 'ok') return;
+  const limit = axis === 'v' ? d.width : d.height;
+  d.guides.push(createGuide(axis, Math.max(0, Math.min(limit, pos))));
+  d.commit('新增參考線');
+  app.changed();
+}
+
+async function gridSizeDialog(app: App): Promise<void> {
+  let size = app.gridSize;
+  const body = formGrid([
+    ['格點間距 (px)', numberControl(size, 2, 500, 1, (v) => { size = Math.round(v); })],
+  ]);
+  if (await openModal({ title: '格點間距', body }) !== 'ok') return;
+  app.gridSize = Math.max(2, size);
+  app.events.emit('view-changed', undefined);
+  app.changed();
+}
+
+/** Build guides along the edges of the current selection. */
+function guidesFromSelection(app: App): void {
+  const d = doc(app);
+  const b = d?.selection.bounds();
+  if (!d || !b) { app.toast('請先建立選取範圍', 'error'); return; }
+  d.guides.push(
+    createGuide('v', b.x), createGuide('v', b.x + b.w),
+    createGuide('h', b.y), createGuide('h', b.y + b.h),
+  );
+  d.commit('由選取範圍建立參考線');
+  app.changed();
+}
+
+const snapToggle = (
+  id: string, label: string, key: 'toGuides' | 'toGrid' | 'toDocument' | 'toLayers',
+): Cmd => cmd(id, label, (a) => {
+  a.snap[key] = !a.snap[key];
+  a.events.emit('view-changed', undefined);
+}, { checked: (a) => a.snap[key] });
+
 export const VECTOR_COMMANDS: Cmd[] = [
+  // ---- guides and snapping ----
+  cmd('view.guides', '顯示參考線', (a) => {
+    const v = a.view();
+    v.showGuides = !v.showGuides;
+    a.events.emit('view-changed', undefined);
+  }, { shortcut: "Ctrl+;", enabled: (a) => !!doc(a), checked: (a) => a.view().showGuides }),
+  cmd('view.lockGuides', '鎖定參考線', (a) => {
+    const d = doc(a);
+    if (!d) return;
+    d.guidesLocked = !d.guidesLocked;
+    d.commit(d.guidesLocked ? '鎖定參考線' : '解除鎖定參考線');
+    a.changed();
+  }, { shortcut: 'Ctrl+Alt+;', enabled: (a) => !!doc(a), checked: (a) => !!doc(a)?.guidesLocked }),
+  cmd('view.newGuide', '新增參考線…', (a) => newGuideDialog(a), { enabled: (a) => !!doc(a) }),
+  cmd('view.guidesFromSelection', '由選取範圍建立參考線', guidesFromSelection, {
+    enabled: hasSelection,
+  }),
+  cmd('view.clearGuides', '清除參考線', (a) => {
+    const d = doc(a);
+    if (!d || !d.guides.length) return;
+    d.guides = [];
+    d.commit('清除參考線');
+    a.changed();
+  }, { enabled: (a) => (doc(a)?.guides.length ?? 0) > 0 }),
+  cmd('view.snap', '靠齊', (a) => {
+    a.snap.enabled = !a.snap.enabled;
+    a.events.emit('view-changed', undefined);
+    a.status(a.snap.enabled ? '已開啟靠齊（拖曳時按住 Ctrl 可暫時停用）' : '已關閉靠齊');
+  }, { shortcut: 'Ctrl+Shift+;', checked: (a) => a.snap.enabled }),
+  snapToggle('view.snapGuides', '靠齊至參考線', 'toGuides'),
+  snapToggle('view.snapGrid', '靠齊至格點', 'toGrid'),
+  snapToggle('view.snapDocument', '靠齊至文件邊界', 'toDocument'),
+  snapToggle('view.snapLayers', '靠齊至圖層', 'toLayers'),
+  cmd('view.gridSize', '格點間距…', (a) => gridSizeDialog(a)),
+
+
   // ---- liquify ----
   cmd('filter.liquify', '液化…', (a) => liquifyDialog(a), {
     shortcut: 'Ctrl+Shift+X',

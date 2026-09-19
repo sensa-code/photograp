@@ -4,6 +4,7 @@ import { Selection } from './selection';
 import { clonePath, type VectorPath } from './path';
 import type { AlphaChannel } from './channels';
 import type { QuickMask } from './quickmask';
+import type { Guide } from './guides';
 
 export interface HistorySnapshot {
   label: string;
@@ -17,6 +18,8 @@ export interface HistorySnapshot {
   activePathId: string | null;
   channels: AlphaChannel[];
   quickMask: QuickMask | null;
+  guides: Guide[];
+  guidesLocked: boolean;
 }
 
 export interface HistoryHost {
@@ -29,6 +32,8 @@ export interface HistoryHost {
   activePathId: string | null;
   channels: AlphaChannel[];
   quickMask: QuickMask | null;
+  guides: Guide[];
+  guidesLocked: boolean;
 }
 
 /**
@@ -61,6 +66,8 @@ export class History {
       quickMask: host.quickMask
         ? { ...host.quickMask, color: { ...host.quickMask.color } }
         : null,
+      guides: host.guides.map((g) => ({ ...g })),
+      guidesLocked: host.guidesLocked,
     };
   }
 
@@ -89,6 +96,8 @@ export class History {
     host.quickMask = snap.quickMask
       ? { ...snap.quickMask, color: { ...snap.quickMask.color } }
       : null;
+    host.guides = snap.guides.map((g) => ({ ...g }));
+    host.guidesLocked = snap.guidesLocked;
   }
 
   undo(host: HistoryHost): boolean {
