@@ -330,6 +330,19 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .panel-histogram .panel-body { display: grid; gap: 8px; }
 .panel-histogram:not(.collapsed),
 .panel-history:not(.collapsed) { flex: 0 0 auto; }
+.panel-comps:not(.collapsed) { flex: 0 0 auto; }
+
+.comp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 7px;
+  border-radius: var(--radius);
+  cursor: default;
+}
+.comp-row:hover { background: var(--bg-panel-alt); }
+.comp-row .tools { margin-left: auto; display: flex; gap: 2px; opacity: 0; }
+.comp-row:hover .tools { opacity: 0.8; }
 /* The rest may shrink, but not past the point of being readable. */
 .panels > .panel:not(.grow):not(.collapsed) { min-height: 104px; }
 .panel-head .caret { color: var(--text-dim); transition: transform .12s; }

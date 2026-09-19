@@ -6,6 +6,7 @@ import { clonePath, type VectorPath } from './path';
 import type { AlphaChannel } from './channels';
 import type { QuickMask } from './quickmask';
 import type { Guide } from './guides';
+import { cloneComp, type LayerComp } from './comps';
 
 export interface HistorySnapshot {
   label: string;
@@ -21,6 +22,7 @@ export interface HistorySnapshot {
   quickMask: QuickMask | null;
   guides: Guide[];
   guidesLocked: boolean;
+  comps: LayerComp[];
 }
 
 /** A history state the user parked under a name of their own. */
@@ -42,6 +44,7 @@ export interface HistoryHost {
   quickMask: QuickMask | null;
   guides: Guide[];
   guidesLocked: boolean;
+  comps: LayerComp[];
 }
 
 /**
@@ -83,6 +86,7 @@ export class History {
         : null,
       guides: host.guides.map((g) => ({ ...g })),
       guidesLocked: host.guidesLocked,
+      comps: host.comps.map(cloneComp),
     };
   }
 
@@ -113,6 +117,7 @@ export class History {
       : null;
     host.guides = snap.guides.map((g) => ({ ...g }));
     host.guidesLocked = snap.guidesLocked;
+    host.comps = snap.comps.map(cloneComp);
   }
 
   undo(host: HistoryHost): boolean {

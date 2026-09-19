@@ -18,6 +18,7 @@ import { ChannelsPanel } from './panels/channels';
 import { PathsPanel } from './panels/paths';
 import { BrushesPanel } from './panels/brushes';
 import { HistogramPanel } from './panels/histogram';
+import { CompsPanel } from './panels/comps';
 import { panelTabs } from './panels/group';
 import { TextEditor } from './text-editor';
 import { installShortcuts } from './shortcuts';
@@ -65,6 +66,7 @@ export class AppUI {
       new NavigatorPanel(app, this.view).root,
       new ColorPanel(app).root,
       new HistogramPanel(app).root,
+      new CompsPanel(app).root,
       new HistoryPanel(app).root,
       stack);
     makePanelsCollapsible(panels);

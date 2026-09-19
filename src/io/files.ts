@@ -11,6 +11,7 @@ import { warmEmbedded } from '../core/patterns';
 import { renderShapeLayer } from '../core/shape';
 import type { QuickMask } from '../core/quickmask';
 import type { Guide } from '../core/guides';
+import { cloneComp, normalizeComp, type LayerComp } from '../core/comps';
 
 export const PROJECT_EXT = '.pgraph';
 const PROJECT_MAGIC = 'photograp-project';
@@ -155,6 +156,7 @@ interface SerializedDoc {
   quickMask?: SerializedQuickMask | null;
   guides?: Guide[];
   guidesLocked?: boolean;
+  comps?: LayerComp[];
 }
 
 const encode = (s: Surface | null): string | null => (s ? s.canvas.toDataURL('image/png') : null);
@@ -232,6 +234,7 @@ export function serializeDocument(doc: PhotoDoc): string {
       : null,
     guides: doc.guides.map((g) => ({ ...g })),
     guidesLocked: doc.guidesLocked,
+    comps: doc.comps.map(cloneComp),
   };
   return JSON.stringify(out);
 }
@@ -312,6 +315,9 @@ export async function loadProject(text: string): Promise<PhotoDoc> {
   }));
   doc.guides = (data.guides ?? []).map((g) => ({ ...g }));
   doc.guidesLocked = data.guidesLocked ?? false;
+  doc.comps = (data.comps ?? [])
+    .map(normalizeComp)
+    .filter((c): c is LayerComp => c !== null);
   if (data.quickMask) {
     const img = await loadImageSrc(data.quickMask.surface);
     const surface = createSurface(data.width, data.height);

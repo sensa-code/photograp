@@ -7,6 +7,9 @@ import { createSurface, cloneSurface, opaqueBounds } from '../src/core/surface';
 import { Selection, rasterizePath } from '../src/core/selection';
 import type { Rect } from '../src/core/geometry';
 import {
+  applyComp, captureComp, cloneComp, describeComp, normalizeComp, recaptureComp,
+} from '../src/core/comps';
+import {
   carveVertical, contentAwareScale, contentAwareScaleAsync, energyMap, findVerticalSeam,
   insertVerticalSeam, removeVerticalSeam, resampleMask, transposeMask, transposeRGBA,
 } from '../src/filters/seam';
@@ -1976,6 +1979,166 @@ async function run(): Promise<void> {
     assert(cachedPatternSurface(embeddedPattern(overlay)!), 'warmEmbedded 後應已在快取中');
   });
 
+  // ---- layer comps ----
+  group('圖層構成');
+  /** A document with three layers in known states. */
+  const compDoc = (): PhotoDoc => {
+    const d = PhotoDoc.createBlank('comps', 40, 40, 'white');
+    for (const name of ['a', 'b']) {
+      const l = createRasterLayer(name, 40, 40);
+      l.surface!.ctx.fillStyle = '#000';
+      l.surface!.ctx.fillRect(0, 0, 10, 10);
+      d.layers.push(l);
+    }
+    return d;
+  };
+
+  await test('擷取會記下每一個圖層', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, '起始');
+    assert(comp.layers.length === 3, `應記下三個圖層，實得 ${comp.layers.length}`);
+    assert(comp.name === '起始', '名稱');
+    assert(describeComp(comp).includes('3 個圖層'), `描述有誤：${describeComp(comp)}`);
+  });
+  await test('群組內的子圖層也會被記下', () => {
+    const d = compDoc();
+    const g = createRasterLayer('群組', 40, 40);
+    g.kind = 'group';
+    g.surface = null;
+    g.children = [createRasterLayer('子', 40, 40)];
+    d.layers.push(g);
+    const comp = captureComp(d.layers, '帶群組');
+    assert(comp.layers.length === 5, `應含群組與子圖層，實得 ${comp.layers.length}`);
+  });
+  await test('套用會還原可見度、位置與外觀', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, '原狀');
+    const l = d.layers[1];
+    l.visible = false;
+    l.x = 17;
+    l.opacity = 0.25;
+    l.blend = 'multiply';
+    l.effects.dropShadow.enabled = true;
+    applyComp(d.layers, comp);
+    const state = () => ({ visible: l.visible, x: l.x, opacity: l.opacity, blend: String(l.blend) });
+    assert(state().visible, '可見度應還原');
+    assert(state().x === 0, '位置應還原');
+    near(state().opacity, 1, 0.001, '不透明度應還原');
+    assert(state().blend === 'normal', '混合模式應還原');
+    assert(!l.effects.dropShadow.enabled, '圖層樣式應還原');
+  });
+  await test('只記可見度的構成不會動到位置', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, '只看可見度', {
+      visibility: true, position: false, appearance: false,
+    });
+    const l = d.layers[1];
+    l.visible = false;
+    l.x = 21;
+    l.opacity = 0.5;
+    applyComp(d.layers, comp);
+    assert(l.visible, '可見度應還原');
+    assert(l.x === 21, '位置不應被動到');
+    near(l.opacity, 0.5, 0.001, '不透明度不應被動到');
+    assert(describeComp(comp).includes('可見度') && !describeComp(comp).includes('位置'),
+      `描述應只提可見度：${describeComp(comp)}`);
+  });
+  await test('對新增與已刪的圖層誠實回報', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, '舊的');
+    d.layers.pop();
+    d.layers.push(createRasterLayer('新的', 40, 40));
+    d.layers.push(createRasterLayer('又一個', 40, 40));
+    const res = applyComp(d.layers, comp);
+    assert(res.applied === 2, `應套用兩個，實得 ${res.applied}`);
+    assert(res.missing === 1, `應有一個已不存在，實得 ${res.missing}`);
+    assert(res.extra === 2, `應有兩個不在構成裡，實得 ${res.extra}`);
+  });
+  await test('新增的圖層不會被構成藏起來', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, '舊的');
+    const fresh = createRasterLayer('新的', 40, 40);
+    fresh.visible = true;
+    d.layers.push(fresh);
+    applyComp(d.layers, comp);
+    assert(fresh.visible, '構成沒提到的圖層應保持原樣');
+  });
+  await test('構成不共用圖層樣式物件', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, 'x');
+    comp.layers[1].effects.dropShadow.blur = 99;
+    assert(d.layers[1].effects.dropShadow.blur !== 99, '改構成不應改到圖層');
+    const copy = cloneComp(comp);
+    copy.layers[1].effects.dropShadow.blur = 7;
+    copy.capture.position = false;
+    assert(comp.layers[1].effects.dropShadow.blur === 99, 'cloneComp 應是深拷貝');
+    assert(comp.capture.position, 'cloneComp 應拷貝設定');
+  });
+  await test('重新擷取保留 id 與設定', () => {
+    const d = compDoc();
+    const comp = captureComp(d.layers, '我的', { visibility: true, position: false, appearance: true }, '說明');
+    d.layers[1].opacity = 0.3;
+    const next = recaptureComp(comp, d.layers);
+    assert(next.id === comp.id, 'id 應不變');
+    assert(next.name === '我的' && next.note === '說明', '名稱與說明應保留');
+    assert(!next.capture.position, '設定應保留');
+    near(next.layers[1].opacity, 0.3, 0.001, '應抓到新狀態');
+  });
+  await test('構成可以還原，也能被還原', () => {
+    const d = compDoc();
+    d.comps = [captureComp(d.layers, '全開')];
+    d.commit('建立構成');
+    const before = d.comps.length;
+    d.comps = [];
+    d.commit('刪掉');
+    assert(d.comps.length === 0, '刪掉了');
+    d.undo();
+    assert(d.comps.length === before, `還原後構成應回來，實得 ${d.comps.length}`);
+    assert(d.comps[0].name === '全開', '內容也要回來');
+  });
+  await test('構成可以存進專案檔', async () => {
+    const d = compDoc();
+    d.layers[1].visible = false;
+    d.layers[1].x = 9;
+    d.comps = [captureComp(d.layers, '藏起 b', { visibility: true, position: true, appearance: false }, '備註')];
+    const back = await loadProject(serializeDocument(d));
+    assert(back.comps.length === 1, '應還原一個構成');
+    const comp = back.comps[0];
+    assert(comp.name === '藏起 b' && comp.note === '備註', '名稱與說明');
+    assert(!comp.capture.appearance, '設定應保留');
+    assert(comp.layers.length === 3, '圖層數應一致');
+    // The ids survive the round trip, so applying still finds its layers.
+    back.layers[1].visible = true;
+    const res = applyComp(back.layers, comp);
+    assert(res.applied === 3, `應套用到三個圖層，實得 ${res.applied}`);
+    assert(!back.layers[1].visible, '還原後應再次藏起');
+  });
+  await test('壞掉的構成資料會被修正或丟掉', () => {
+    assert(normalizeComp({} as never) === null, '沒有圖層清單的應丟掉');
+    const fixed = normalizeComp({
+      layers: [{ id: 'a' }, { id: '' }],
+    } as never)!;
+    assert(fixed, '應修得回來');
+    assert(fixed.id.length > 0 && fixed.name.length > 0, 'id 與名稱應補上');
+    assert(fixed.layers.length === 1, '沒有 id 的圖層應丟掉');
+    assert(fixed.layers[0].effects.dropShadow, '效果應補上預設');
+    assert(fixed.capture.visibility && fixed.capture.position, '設定應補上預設');
+  });
+  await test('套用構成會改變合成結果', () => {
+    const d = compDoc();
+    d.layers[1].surface!.ctx.fillStyle = '#ff0000';
+    d.layers[1].surface!.ctx.fillRect(0, 0, 40, 40);
+    const shown = captureComp(d.layers, '顯示');
+    d.layers[1].visible = false;
+    const hidden = captureComp(d.layers, '隱藏');
+    applyComp(d.layers, shown);
+    assert(pixel(d.render(), 20, 20)[0] > 200, '顯示時應看得到紅色');
+    applyComp(d.layers, hidden);
+    const after = pixel(d.render(), 20, 20);
+    assert(after[1] > 200 && after[2] > 200, `隱藏時應回到白底，實得 ${after}`);
+  });
+
+  // ---- inner effects ----
   group('內側效果與斜角');
   /** A solid square in the middle, so inside and outside are easy to tell. */
   const block = (size = 60, box = 30): ReturnType<typeof createRasterLayer> => {

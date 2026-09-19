@@ -259,6 +259,19 @@ localStorage 作法；載入時合併到 `defaultEffects()` 上，舊樣式缺�
 - 筆刷本身就是以 `DirectStroke` 實作的仿製印章，只是來源換成那張歷史表面、
   取樣位置不偏移。
 
+## 圖層構成
+
+`core/comps.ts` 的圖層構成記的是**文件看起來的樣子**，不是它的內容：
+每個圖層的可見度、位置、不透明度、混合模式與圖層樣式。像素完全不碰，
+所以一個構成只花掉幾個數字的記憶體。
+
+- 套用時以圖層 id 對應。構成之後新增的圖層**不會被藏起來**，已經刪掉的
+  就只是沒東西可還原；兩者都會在狀態列說清楚，而不是裝作一切正常。
+- `comps` 跟 `guides`、`channels` 一樣進入 `HistorySnapshot`，所以建立、更新與
+  刪除都能還原；`activeCompId` 只是面板的游標，不列入快取。
+- 從專案檔讀回來的構成走 `normalizeComp()`：效果合併到 `defaultEffects()` 上，
+  沒有 id 的項目直接丟掉（它永遠對不到任何圖層）。
+
 ## 面板
 
 - 面板收起時靠 `.panel.collapsed .panel-body { display: none }` 隱藏內容，

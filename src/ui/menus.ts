@@ -139,6 +139,12 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
         cmdEntry('layer.up'),
         cmdEntry('layer.down'),
       ]),
+      sub('圖層構成', [
+        cmdEntry('comp.new'),
+        cmdEntry('comp.apply'),
+        cmdEntry('comp.update'),
+        cmdEntry('comp.delete'),
+      ]),
       sub('對齊與分佈', [
         cmdEntry('layer.alignLeft'),
         cmdEntry('layer.alignCenterH'),

@@ -13,6 +13,7 @@ import type { Guide } from './guides';
 import { renderChannelView, type AlphaChannel, type ChannelView } from './channels';
 import { renderSmartLayer } from './smart';
 import { renderTextLayer } from './text';
+import type { LayerComp } from './comps';
 import { renderShapeLayer, transformPathPoints } from './shape';
 import {
   createQuickMask, quickMaskCoverage, quickMaskIsFull, renderQuickMaskOverlay, type QuickMask,
@@ -52,6 +53,11 @@ export class PhotoDoc {
   livePreview: LivePreview | null = null;
   soloLayerId: string | null = null;
   savedRevision = 0;
+  /** Saved layer comps: named views of visibility, position and appearance. */
+  comps: LayerComp[] = [];
+  /** Which comp the panel is acting on; not part of the undo history. */
+  activeCompId: string | null = null;
+
   /** Saved vector paths; the last one is usually the live work path. */
   paths: VectorPath[] = [];
   activePathId: string | null = null;

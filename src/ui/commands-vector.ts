@@ -22,6 +22,9 @@ import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../fil
 import { loadImageFile, pickFiles } from '../io/files';
 import { liquifyDialog } from './dialogs/liquify';
 import { refineEdgeDialog } from './dialogs/refine';
+import {
+  applyComp, captureComp, defaultCapture, recaptureComp, type LayerComp,
+} from '../core/comps';
 import { contentAwareScaleDialog } from './dialogs/seam';
 import { cmd, type Cmd } from './command-types';
 import { el, on } from './dom';
@@ -495,6 +498,72 @@ function fillFromHistory(app: App): void {
   app.changed();
 }
 
+async function newComp(app: App): Promise<void> {
+  const d = doc(app);
+  if (!d) return;
+  const capture = defaultCapture();
+  const name = el('input', {
+    type: 'text', value: `圖層構成 ${d.comps.length + 1}`,
+  }) as HTMLInputElement;
+  const note = el('input', { type: 'text', placeholder: '選填說明' }) as HTMLInputElement;
+  const body = formGrid([
+    ['名稱', name],
+    ['說明', note],
+    [null, checkboxControl('可見度', capture.visibility, (v) => { capture.visibility = v; })],
+    [null, checkboxControl('位置', capture.position, (v) => { capture.position = v; })],
+    [null, checkboxControl('外觀（混合模式、不透明度、圖層樣式）',
+      capture.appearance, (v) => { capture.appearance = v; })],
+  ]);
+  if (await openModal({ title: '建立圖層構成', body, width: 380 }) !== 'ok') return;
+
+  const comp = captureComp(d.layers, name.value.trim(), capture, note.value.trim());
+  d.comps = [...d.comps, comp];
+  d.activeCompId = comp.id;
+  d.commit('建立圖層構成');
+  app.status(`已建立圖層構成「${comp.name}」`);
+  app.changed();
+}
+
+const currentComp = (app: App): LayerComp | null => {
+  const d = doc(app);
+  return d?.comps.find((c) => c.id === d.activeCompId) ?? null;
+};
+
+function applyCurrentComp(app: App): void {
+  const d = doc(app);
+  const comp = currentComp(app);
+  if (!d || !comp) return;
+  const res = applyComp(d.layers, comp);
+  d.commit(`套用構成：${comp.name}`);
+  const bits = [`套用了 ${res.applied} 個圖層`];
+  // Say so rather than pretending: a comp taken before a layer was deleted
+  // simply has nothing to restore for it.
+  if (res.missing) bits.push(`${res.missing} 個已不存在`);
+  if (res.extra) bits.push(`${res.extra} 個不在這個構成裡`);
+  app.status(bits.join('，'));
+  app.changed();
+}
+
+function updateCurrentComp(app: App): void {
+  const d = doc(app);
+  const comp = currentComp(app);
+  if (!d || !comp) return;
+  d.comps = d.comps.map((c) => (c.id === comp.id ? recaptureComp(c, d.layers) : c));
+  d.commit('更新圖層構成');
+  app.status(`「${comp.name}」已更新為目前狀態`);
+  app.changed();
+}
+
+function deleteCurrentComp(app: App): void {
+  const d = doc(app);
+  const comp = currentComp(app);
+  if (!d || !comp) return;
+  d.comps = d.comps.filter((c) => c.id !== comp.id);
+  d.activeCompId = null;
+  d.commit('刪除圖層構成');
+  app.changed();
+}
+
 /** The active layer when it is type, which is what the path commands act on. */
 const textLayer = (app: App): ReturnType<PhotoDoc['activeLayer']> => {
   const l = doc(app)?.activeLayer();
@@ -646,6 +715,20 @@ export const VECTOR_COMMANDS: Cmd[] = [
   snapToggle('view.snapDocument', '靠齊至文件邊界', 'toDocument'),
   snapToggle('view.snapLayers', '靠齊至圖層', 'toLayers'),
   cmd('view.gridSize', '格點間距…', (a) => gridSizeDialog(a)),
+
+  // ---- layer comps ----
+  cmd('comp.new', '建立圖層構成…', (a) => { void newComp(a); }, {
+    enabled: (a) => !!doc(a),
+  }),
+  cmd('comp.apply', '套用圖層構成', applyCurrentComp, {
+    enabled: (a) => !!currentComp(a),
+  }),
+  cmd('comp.update', '更新圖層構成', updateCurrentComp, {
+    enabled: (a) => !!currentComp(a),
+  }),
+  cmd('comp.delete', '刪除圖層構成', deleteCurrentComp, {
+    enabled: (a) => !!currentComp(a),
+  }),
 
   // ---- content-aware scale ----
   cmd('edit.contentAwareScale', '內容感知比例…', (a) => {
