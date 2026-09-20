@@ -267,6 +267,8 @@ export interface Layer {
 export interface DocumentMeta {
   id: string;
   name: string;
+  /** Where the document lives on disk, in the desktop build only. */
+  filePath?: string;
   width: number;
   height: number;
   /** Pixels per inch, used by print-size readouts only. */

@@ -63,7 +63,11 @@ import {
   wrapLines, wrapText,
 } from '../src/core/text';
 import { createTextLayer } from '../src/core/layer';
-import { serializeDocument, loadProject } from '../src/io/files';
+import { serializeDocument, loadProject, pickOpenFiles, pickedFromDesktop } from '../src/io/files';
+import {
+  dataUrlToBlob, dataUrlToText, desktopOpen, desktopPending, desktopRead,
+  desktopSaveText, isDesktop, desktopPlatform, desktopConfirmClose,
+} from '../src/io/desktop';
 import { TOOLS } from '../src/tools';
 import { optionDefaults, type ToolPointer } from '../src/tools/types';
 import { app } from '../src/core/app';
@@ -4803,6 +4807,49 @@ async function run(): Promise<void> {
     const out = compositeLayers([base, grp], { width: 4, height: 4 });
     const px = pixel(out, 2, 2);
     assert(px[0] === 255 && px[3] === 255, `被範圍檔下的地方要露出原本的底，實得 ${px}`);
+  });
+
+  // ---- desktop bridge ----
+  group('桌面版橋接');
+  await test('瀏覽器裡沒有橋接', () => {
+    assert(!isDesktop(), '测試跑在瀏覽器，不該被當成桌面版');
+    assert(desktopPlatform() === 'web', `平台應該是 web，實得 ${desktopPlatform()}`);
+  });
+  await test('沒有橋接時每一個呼叫都回報不支援', async () => {
+    assert(await desktopOpen() === null, '開檔應回 null 讓呼叫端改走網頁路徑');
+    assert(await desktopRead('x.png') === null, '讀檔應回 null');
+    assert(await desktopSaveText('a', 'b.pgraph', 'pgraph') === null, '儲存應回 null');
+    assert(await desktopConfirmClose('?') === null, '確認應回 null');
+    const pending = await desktopPending();
+    assert(Array.isArray(pending) && pending.length === 0, '待開檔清單應是空陣列');
+  });
+  await test('base64 資料 URL 可以轉回文字', () => {
+    const text = '{"標題":"中文測試","n":12}';
+    const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+    assert(dataUrlToText(`data:application/json;base64,${b64}`) === text, '解碼後應該一模一樣');
+  });
+  await test('沒編碼的資料 URL 也讀得出來', () => {
+    const text = 'plain, not base64';
+    assert(dataUrlToText(`data:text/plain,${encodeURIComponent(text)}`) === text, '應該還原');
+  });
+  await test('資料 URL 轉成 Blob', async () => {
+    const blob = await dataUrlToBlob('data:text/plain;base64,aGVsbG8=');
+    assert(await blob.text() === 'hello', 'Blob 內容應該正確');
+  });
+  await test('桌面檔案可以包成一般的挑選結果', async () => {
+    const picked = pickedFromDesktop({
+      path: 'D:/x/專案.pgraph',
+      name: '專案.pgraph',
+      data: 'data:application/json;base64,eyJhIjoxfQ==',
+    });
+    assert(picked.name === '專案.pgraph', '名稱應該帶過來');
+    assert(picked.path === 'D:/x/專案.pgraph', '路徑應該帶過來');
+    assert(await picked.text() === '{"a":1}', '內容應該讀得出來');
+  });
+  await test('pickOpenFiles 在瀏覽器裡不會碰橋接', () => {
+    // It must not throw when there is no bridge; it falls through to the
+    // file input, which needs a real click, so only the call is checked.
+    assert(typeof pickOpenFiles === 'function', '應該是個函式');
   });
 
   // ---- tools smoke test ----

@@ -13,12 +13,54 @@ import { renderShapeLayer } from '../core/shape';
 import type { QuickMask } from '../core/quickmask';
 import type { Guide } from '../core/guides';
 import { cloneComp, normalizeComp, type LayerComp } from '../core/comps';
+import {
+  dataUrlToBlob, dataUrlToText, desktopOpen, desktopSaveBinary, desktopSaveText,
+  desktopSaveTextAs, isDesktop, type DesktopFile,
+} from './desktop';
 
 export const PROJECT_EXT = '.pgraph';
 const PROJECT_MAGIC = 'photograp-project';
 const PROJECT_VERSION = 5;
 
 export interface OpenedImage { name: string; image: HTMLImageElement }
+
+/**
+ * One file to open, however it was chosen. The desktop build hands back a
+ * path as well, which is what lets a project save back over itself.
+ */
+export interface PickedFile {
+  name: string;
+  path?: string;
+  text(): Promise<string>;
+  blob(): Promise<Blob>;
+}
+
+const fromFile = (f: File): PickedFile => ({
+  name: f.name,
+  text: () => f.text(),
+  blob: () => Promise.resolve(f as Blob),
+});
+
+const fromDesktop = (f: DesktopFile): PickedFile => ({
+  name: f.name,
+  path: f.path,
+  text: () => Promise.resolve(dataUrlToText(f.data)),
+  blob: () => dataUrlToBlob(f.data),
+});
+
+export const pickedFromDesktop = fromDesktop;
+
+/**
+ * Ask for files: a native dialog in the desktop build, the browser's file
+ * input everywhere else.
+ */
+export async function pickOpenFiles(
+  accept: string, multiple = false, images = false,
+): Promise<PickedFile[]> {
+  const native = await desktopOpen({ multiple, images });
+  if (native) return native.map(fromDesktop);
+  return (await pickFiles(accept, multiple)).map(fromFile);
+}
 
 export function pickFiles(accept: string, multiple = false): Promise<File[]> {
   return new Promise((resolve) => {
@@ -68,10 +110,11 @@ export function downloadBlob(blob: Blob, filename: string): void {
 
 export type ExportFormat = 'png' | 'jpeg' | 'webp';
 
+/** Returns false when the user cancelled the save dialog. */
 export async function exportDocument(
   doc: PhotoDoc, format: ExportFormat, quality: number, filename?: string,
   background?: string,
-): Promise<void> {
+): Promise<boolean> {
   const render = doc.render();
   let out = render;
   if (format === 'jpeg' || background) {
@@ -84,7 +127,14 @@ export async function exportDocument(
     out.canvas.toBlob(resolve, `image/${format}`, quality));
   if (!blob) throw new Error('匯出失敗');
   const base = (filename ?? doc.meta.name).replace(/\.[^.]+$/, '');
-  downloadBlob(blob, `${base}.${format === 'jpeg' ? 'jpg' : format}`);
+  const ext = format === 'jpeg' ? 'jpg' : format;
+  if (isDesktop()) {
+    // A native save dialog, so the file lands where the user says rather
+    // than in the downloads folder.
+    return (await desktopSaveBinary(blob, `${base}.${ext}`, ext)) !== null;
+  }
+  downloadBlob(blob, `${base}.${ext}`);
+  return true;
 }
 
 // ---- project serialisation -------------------------------------------------
@@ -243,12 +293,29 @@ export function serializeDocument(doc: PhotoDoc): string {
   return JSON.stringify(out);
 }
 
-export async function saveProject(doc: PhotoDoc): Promise<void> {
+/**
+ * Save the project. On the desktop a document that came from disk saves back
+ * over itself unless `saveAs` is set; in the browser every save is a download.
+ * Returns false when the user cancelled.
+ */
+export async function saveProject(doc: PhotoDoc, saveAs = false): Promise<boolean> {
   const json = serializeDocument(doc);
-  const blob = new Blob([json], { type: 'application/json' });
   const base = doc.meta.name.replace(/\.[^.]+$/, '');
+  const ext = PROJECT_EXT.slice(1);
+  if (isDesktop()) {
+    const saved = saveAs
+      ? await desktopSaveTextAs(json, `${base}${PROJECT_EXT}`, ext)
+      : await desktopSaveText(json, `${base}${PROJECT_EXT}`, ext, doc.meta.filePath);
+    if (!saved) return false;
+    doc.meta.filePath = saved.path;
+    doc.meta.name = saved.name;
+    doc.savedRevision = doc.revision;
+    return true;
+  }
+  const blob = new Blob([json], { type: 'application/json' });
   downloadBlob(blob, `${base}${PROJECT_EXT}`);
   doc.savedRevision = doc.revision;
+  return true;
 }
 
 async function deserializeLayer(s: SerializedLayer, w: number, h: number): Promise<Layer> {

@@ -39,6 +39,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
       cmdEntry('file.place'),
       sep,
       cmdEntry('file.save'),
+      cmdEntry('file.saveAs'),
       cmdEntry('file.export'),
       cmdEntry('file.exportPng'),
       sep,

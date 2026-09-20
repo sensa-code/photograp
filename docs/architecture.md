@@ -144,6 +144,27 @@ UI 透過 `core/app.ts` 的 `App` 單例取得狀態，並以 `Emitter` 發送�
 `defaultAdjustment()` 是泛型的，傳字面型別時回傳收窄過的變體，
 呼叫端才拿得到該變體自己的欄位。
 
+## 桌面版（electron/ 與 io/desktop.ts）
+
+主行程（`electron/main.cts`）是唯一碰得到檔案系統的地方，算繪行程只能透過
+preload 用 `contextBridge` 開出來的那幾個函式說話，而且開著 `contextIsolation`
+與 `sandbox`。
+
+- 頁面遞過來的路徑一律先比對副檔名白名單（`.pgraph` 與幾種影像格式）再讀，
+  所以就算算繪端被塞了奇怪的字串，也讀不到系統檔案。
+- 檔案是以 **data URL** 交給算繪端的：那正好是專案原本就會解碼的格式，
+  不必為了桌面版多寫一條讀檔路徑。
+- `io/desktop.ts` 是**唯一**允許碰 `window.photograp` 的模組，其他地方都走它。
+  沒有橋接時每個函式回 `null`，呼叫端據此改走網頁路徑——這也是瀏覽器版
+  一行都不用改的原因。
+- 關閉視窗要先問過算繪端：只有它知道有沒有沒存的文件。主行程擋下第一次
+  `close`，等頁面回話，同意了才真的關。
+- 偵錯把手掛在 `window.__photograp`，不是 `window.photograp`——後者是橋接的
+  名字，蓋掉就等於把原生功能全部弄壞。
+
+`package.json` 宣告了 `"type": "module"`，所以 Electron 那邊的原始碼副檔名是
+`.cts`，`tsc` 會輸出 `.cjs`；沙箱化的 preload 本來就必須是 CommonJS。
+
 ## 進階混合（core/blend-range.ts）
 
 混合範圍在合成時判斷，不在圖層自己的算繪裡：它要看的是**下面已經疊好**

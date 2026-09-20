@@ -19,7 +19,7 @@ import { defaultPathBinding, renderTextLayer } from '../core/text';
 import { flattenPath } from '../core/path';
 import { askSnapshotName } from './panels/history';
 import { FILTER_GROUPS, defaultParams, getFilter, type ParamValue } from '../filters/registry';
-import { loadImageFile, pickFiles } from '../io/files';
+import { loadImageFile, pickOpenFiles } from '../io/files';
 import { liquifyDialog } from './dialogs/liquify';
 import { refineEdgeDialog } from './dialogs/refine';
 import {
@@ -178,9 +178,9 @@ async function replaceSmartContents(app: App): Promise<void> {
   const d = doc(app);
   const layer = smartLayer(app);
   if (!d || !layer?.smart) return;
-  const files = await pickFiles('image/*');
+  const files = await pickOpenFiles('image/*', false, true);
   if (!files.length) return;
-  const img = await loadImageFile(files[0]);
+  const img = await loadImageFile(await files[0].blob());
   const source = createSurface(img.naturalWidth, img.naturalHeight);
   source.ctx.drawImage(img, 0, 0);
   replaceSmartSource(layer, source, d.width, d.height);

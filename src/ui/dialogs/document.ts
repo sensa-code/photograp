@@ -205,11 +205,13 @@ export async function exportDialog(app: App): Promise<void> {
 
   if (await openModal({ title: '轉存影像', body }) !== 'ok') return;
   const chosenFormat: string = format;
-  await exportDocument(
+  const done = await exportDocument(
     doc, format, quality / 100, filename,
     whiteBackground || chosenFormat === 'jpeg' ? '#ffffff' : undefined,
   );
-  app.toast('已開始下載影像', 'success');
+  // On the desktop the save dialog can be dismissed, and saying it worked
+  // would be a lie.
+  if (done) app.toast('已轉存影像', 'success');
 }
 
 export async function fillDialog(app: App): Promise<void> {

@@ -19,7 +19,8 @@ import { rgbCss } from '../core/color';
 import { ADJUSTMENT_LABELS, applyAdjustment, defaultAdjustment } from '../filters/adjustments';
 import { FILTERS, getFilter } from '../filters/registry';
 import {
-  copyToClipboard, exportDocument, loadImageFile, loadProject, pickFiles, saveProject,
+  copyToClipboard, exportDocument, loadImageFile, loadProject, pickOpenFiles,
+  saveProject, type PickedFile,
 } from '../io/files';
 import { transformTool, cropTool, getTool } from '../tools';
 import { renderTextLayer } from '../core/text';
@@ -526,15 +527,26 @@ function flipLayer(app: App, axis: 'h' | 'v'): void {
 }
 
 async function openFiles(app: App, asLayer: boolean): Promise<void> {
-  const files = await pickFiles('image/*,.pgraph,application/json', true);
+  const files = await pickOpenFiles('image/*,.pgraph,application/json', true);
+  await openPicked(app, files, asLayer);
+}
+
+/** Open files that have already been chosen, from a dialog or from the OS. */
+export async function openPicked(
+  app: App, files: PickedFile[], asLayer: boolean,
+): Promise<void> {
   for (const file of files) {
     try {
       if (file.name.endsWith('.pgraph')) {
         const doc = await loadProject(await file.text());
+        // Remembering the path is what lets the next save go straight back
+        // to the same file instead of asking again.
+        doc.meta.name = file.name;
+        doc.meta.filePath = file.path;
         app.addDoc(doc);
         continue;
       }
-      const img = await loadImageFile(file);
+      const img = await loadImageFile(await file.blob());
       if (asLayer && app.activeDoc()) {
         const doc = app.activeDoc()!;
         const surface = createSurface(doc.width, doc.height);
@@ -595,15 +607,18 @@ export const COMMANDS: CmdType[] = [
   cmd('file.save', '儲存專案 (.pgraph)', async (a) => {
     const doc = a.activeDoc();
     if (!doc) return;
-    await saveProject(doc);
-    a.toast('已儲存專案檔', 'success');
+    if (await saveProject(doc)) a.toast('已儲存專案檔', 'success');
   }, { shortcut: 'Ctrl+S', enabled: hasDoc }),
+  cmd('file.saveAs', '另存新檔…', async (a) => {
+    const doc = a.activeDoc();
+    if (!doc) return;
+    if (await saveProject(doc, true)) a.toast('已儲存專案檔', 'success');
+  }, { shortcut: 'Ctrl+Shift+Alt+S', enabled: hasDoc }),
   cmd('file.export', '轉存影像…', (a) => exportDialog(a), { shortcut: 'Ctrl+Shift+S', enabled: hasDoc }),
   cmd('file.exportPng', '快速轉存 PNG', async (a) => {
     const doc = a.activeDoc();
     if (!doc) return;
-    await exportDocument(doc, 'png', 1);
-    a.toast('已開始下載 PNG', 'success');
+    if (await exportDocument(doc, 'png', 1)) a.toast('已轉存 PNG', 'success');
   }, { enabled: hasDoc }),
   cmd('file.close', '關閉文件', async (a) => {
     const doc = a.activeDoc();
