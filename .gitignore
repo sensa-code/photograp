@@ -8,3 +8,6 @@ Thumbs.db
 # Desktop build output
 dist-electron/
 release/
+
+# Claude Code 本機工作階段鎖檔
+.claude/scheduled_tasks.lock
