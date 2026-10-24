@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { forgetInstallRequest, installUpdateNow, setupUpdater, updateInstallRequested } from './updater.cjs';
 
 /** Extensions the app knows how to open, without the leading dot. */
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
@@ -142,10 +143,7 @@ async function createWindow(): Promise<BrowserWindow> {
     // A renderer that never answers must not trap the window: after a short
     // wait the close goes ahead on its own.
     if (askTimer) clearTimeout(askTimer);
-    askTimer = setTimeout(() => {
-      closing = true;
-      win.close();
-    }, 2000);
+    askTimer = setTimeout(approveClose, 2000);
   });
 
   let saving: NodeJS.Timeout | null = null;
@@ -159,6 +157,16 @@ async function createWindow(): Promise<BrowserWindow> {
   win.on('closed', () => { mainWindow = null; });
 
   return win;
+}
+
+/** The renderer agreed to close (or never answered). */
+function approveClose(): void {
+  if (askTimer) { clearTimeout(askTimer); askTimer = null; }
+  closing = true;
+  // After "restart to update" the installer takes over the quit; if it cannot
+  // start, the window stays open and the next close asks again.
+  if (updateInstallRequested()) closing = installUpdateNow();
+  else mainWindow?.close();
 }
 
 /** Tell the renderer to open a file the OS handed us. */
@@ -255,6 +263,9 @@ function register(): void {
   ipcMain.handle('photograp:pending', () => pending.splice(0, pending.length));
 
   ipcMain.handle('photograp:confirm-close', async (_e, message: string) => {
+    // The renderer is alive and asking the user, so the no-answer fallback
+    // must not close the window (or start an update) behind this dialog.
+    if (askTimer) { clearTimeout(askTimer); askTimer = null; }
     if (!mainWindow) return true;
     const r = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
@@ -272,10 +283,9 @@ function register(): void {
   });
 
   ipcMain.on('photograp:quit-decision', (_e, ok: boolean) => {
+    if (ok) { approveClose(); return; }
     if (askTimer) { clearTimeout(askTimer); askTimer = null; }
-    if (!ok) return;
-    closing = true;
-    mainWindow?.close();
+    forgetInstallRequest();
   });
 }
 
@@ -302,6 +312,7 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     register();
+    setupUpdater(() => mainWindow);
     pending.push(...filesFromArgv(process.argv));
     mainWindow = await createWindow();
 

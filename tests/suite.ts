@@ -103,6 +103,7 @@ import { layerMatchesFilter } from '../src/ui/panels/layers';
 import { assert, filled, group, near, pixel, render, test } from './harness';
 import { launchTests } from './launch.test';
 import { autosaveTests } from './autosave.test';
+import { updateTests } from './update.test';
 
 async function run(): Promise<void> {
   // ---- colour ----
@@ -4821,6 +4822,7 @@ async function run(): Promise<void> {
 
   await launchTests();
   await autosaveTests();
+  await updateTests();
 
   // ---- tools smoke test ----
   group('工具互動');
