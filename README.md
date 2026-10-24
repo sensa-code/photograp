@@ -32,6 +32,9 @@ npm run typecheck # TypeScript 嚴格模式檢查
 
 ### 桌面應用程式
 
+打包好的 Windows 安裝檔與免安裝版放在 GitHub Releases：<https://github.com/sensa-code/photograp/releases>。
+自己建置的話：
+
 ```bash
 npm start         # 建置後直接開啟桌面版
 npm run dev:desktop   # 接開發伺服器，改檔案就即時重載
@@ -50,8 +53,9 @@ Linux 的 AppImage 必須在 Linux 上建置（Windows 兩種目標都已設定�
 應用程式圖示由 `npm run icon` 產生（用 Electron 當光柵化器畫出
 `build/icon.png`），electron-builder 再從它做出各平台需要的格式。
 
-測試：啟動 `npm run dev` 後開啟 <http://localhost:5180/tests/index.html>，
-384 項核心影像運算測試會直接在瀏覽器中執行並列出結果。
+測試：`npm test` 會用 devDependency 的 Electron 開一個隱藏視窗，無頭執行 395 項核心影像運算測試，
+不用開瀏覽器，結果印在終端機（全部通過回傳 0）。想看結果頁的話，啟動 `npm run dev` 後開啟
+<http://localhost:5180/tests/index.html>，同一套測試會直接在瀏覽器中執行並列出結果。
 
 ---
 
@@ -433,7 +437,7 @@ src/
   tools/      工具實作與共用的筆觸引擎
   io/         開檔、轉存、.pgraph 專案序列化
   ui/         選單、工具列、選項列、畫布檢視、面板、對話框
-tests/        瀏覽器測試頁（384 項核心運算測試）
+tests/        瀏覽器測試頁（395 項核心運算測試）
 docs/         架構說明
 ```
 

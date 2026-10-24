@@ -190,6 +190,92 @@ preload 用 `contextBridge` 開出來的那幾個函式說話，而且開著 `co
 或「Refused to …」的訊息出現；瀏覽器裡則看 DevTools
 的 console。改了 CSP 就重跑一次開檔、存檔與轉存。
 
+## 錯誤攔截與大圖護欄
+
+### 全域錯誤攔截（ui/error-guard.ts）
+
+`installErrorGuard(app)` 在 `main.ts` 掛好 `AppUI` 之後安裝，監聽 `window` 的 `error` 與
+`unhandledrejection`。沒有它時，事件處理器裡的例外只會進 console，使用者看到的是一個
+默默停止回應的工具。每次例外都會完整印到 console（含 stack），toast 只顯示訊息的第一行
+（超過 120 字截斷，空訊息顯示「未知錯誤」）。
+
+toast 有去抖：`shouldReport(message, now, log)` 是純函式，同一則訊息在 `REPORT_GAP_MS`
+（2 秒）內只顯示一次，不同訊息仍然各自立刻顯示；只有真的顯示過的訊息才會記進 `log`，
+所以同一個錯誤持續發生時，每個 2 秒窗口仍會看到一次，不會被永久吞掉。超過窗口的紀錄
+會在下一次呼叫時清掉，免得帶座標或 id 的訊息把 Map 撐大。
+
+### 文件尺寸上限（core/limits.ts）
+
+每個圖層 Surface 是 w × h × 4 bytes，4,000 萬像素就是每層 160 MB，再加上合成器、步驟記錄
+與選取範圍各自持有的緩衝；超過之後瀏覽器不會優雅地失敗，而是整個分頁死掉、所有未存的
+文件一起消失。所以：
+
+- `MAX_PIXELS = 40_000_000`（約 8000 × 5000），`MAX_SIDE = 16384`（Chromium 畫布的單邊上限）。
+- `checkDocumentSize(w, h)` 回傳 `{ ok: true }` 或 `{ ok: false, reason }`，`reason` 是給使用者看的
+  中文。新增文件、影像尺寸、版面尺寸三個對話框（`ui/dialogs/document.ts`）在送出時呼叫它，
+  不通過就 toast 原因並中止。
+- `fitWithinLimit(w, h)` 回傳同比例、落在兩個上限內的最大尺寸；本來就在上限內的原樣回傳
+  （`scaled: false`），呼叫端可以無條件套用。
+- `fitImageToLimit(img)` 包在它外面給開檔用：超限的影像**縮小而不是拒絕**。
+  `PhotoDoc.fromImage` 直接重新取樣到目標尺寸，所以原尺寸的點陣圖從頭到尾不會有自己的 Surface；
+  有縮放時回傳 `notice`（「影像超過上限，已縮小為 w×h」），開檔與拖放（`ui/app-ui.ts`）會 toast 它。
+
+對應測試在 `tests/launch.test.ts`（群組「上線保障」）。
+
+## 自動儲存（core/autosave.ts、ui/dialogs/recovery.ts）
+
+每個有未儲存變更的文件都會在 IndexedDB 留一份崩潰備份（資料庫 `photograp`、store `autosave`，
+每個文件 id 一筆，內容就是 `serializeDocument` 產生的專案檔 JSON，另外帶名稱、時間、尺寸、
+圖層數與大小供復原對話框顯示）。序列化函式由 `main.ts` 注入：`core` 不能 import `io`，
+而 `io/files.ts` 已經 import 這裡的 `deleteAutosave`，反向 import 會變成循環。
+
+### 排程（純函式）
+
+排程規則全是「時間紀錄 + 外部時鐘」的純函式，測試不需要計時器：
+
+- `DEBOUNCE_MS = 30_000`：最後一次編輯後安靜 30 秒才寫（trailing debounce），避免寫在一連串編輯中間。
+- `MAX_WAIT_MS = 120_000`：從第一次編輯起最多等 120 秒，一直在畫的長時間工作也會拿到一份備份。
+- `SLOW_SERIALIZE_MS = 1500`：上一次序列化超過 1.5 秒，上面兩個等待都加倍（大文件序列化會卡 UI），
+  並且整個 session 只 toast 一次「文件較大，自動儲存已放慢」。
+- `planAutosave(timing, dirty, now)` 回傳 `idle` / `wait until` / `save`；文件不是 dirty、或沒看過任何
+  變更就 `idle`。
+- `markChanged`、`markClean`、`markWritten`、`markFailed` 分別處理：看到新 revision、文件變乾淨
+  （存檔或剛開啟）、寫完一份（寫入期間又有編輯的話從現在開新窗口）、寫失敗（從現在重新等一個
+  安靜期再重試，而不是立刻迴圈）。
+
+### 寫入
+
+`installAutosave(app, { serialize })` 監聽 `doc-changed` 與 `docs-changed`，用 `doc.revision` 的變化判斷
+有沒有編輯。該寫的時候用 `requestIdleCallback`（timeout 1 秒）排進閒置時段，避開筆觸中間；
+文件還在 `livePreview`（筆觸尚未提交）就延後 1 秒再看。寫入全程量時間，供上面的放慢判斷用。
+
+IndexedDB 的每個操作都是自己一個交易，任何失敗（包含配額滿）都是安靜的 `ok: false`，安全網不能
+自己丟例外。IndexedDB 不存在或被拒（私密視窗、封鎖網站資料）時 `autosaveAvailable()` 變 false，
+只 toast 一次「這個瀏覽器無法使用自動儲存」；寫入失敗會在安靜期後重試，一波編輯內最多 `MAX_RETRIES`
+（3）次，之後等下一次編輯，並提示「可能已滿，請記得手動存檔」。
+
+紀錄的生命週期跟著文件：`io/files.ts` 存專案檔成功後、`App.closeDoc` 關閉文件時都會
+`deleteAutosave(id)`；寫入期間文件被存檔或關掉的話，寫完也會立刻刪掉，不讓紀錄比工作活得久。
+
+### 啟動時復原（ui/dialogs/recovery.ts）
+
+`main.ts` 在安裝自動儲存之後呼叫 `offerRecovery(app)`：列出 store 裡的每一筆（新到舊），
+每列顯示名稱、時間、尺寸、圖層數與大小，各有「復原」與「刪除」，下方還有「全部刪除」
+（會先 `confirmDialog` 確認）。對話框一直開著，直到每一筆都處理完或使用者按「關閉」；
+沒處理的留到下次啟動再列。
+
+- **復原**：用 `loadProject` 載入 JSON，名稱加上「（已復原）」（`recoveredName`，復原兩次只留一個後綴），
+  `doc.touch()` 標成 dirty（這也會啟用關閉前的警告），以新文件開啟並提示另存。
+  紀錄先以新文件的 id 寫一份、再刪舊 id 的那筆，中間沒有「沒有備份」的空窗；
+  舊 id 不重用，因為另一個分頁可能還在用它寫。工作區只有一個沒動過的空白文件時，會被復原的文件取代。
+  載入失敗時紀錄保留（可能是這個版本的問題，不是資料的問題）。
+- **刪除**：`deleteAutosaveIfUnchanged(id, savedAt)` 只在那筆的 `savedAt` 跟列出時相同才刪；
+  另一個分頁在這之後重新寫過的紀錄，是活著的文件的備份，會留著。
+- 所有按鈕共用一個 busy 鎖，載入中再點一次不會把文件開兩份。
+
+對應測試在 `tests/autosave.test.ts`（群組「自動儲存」）：排程規則以純函式驗證，再用獨立的
+資料庫 `photograp-test` 走一趟 IndexedDB 讀寫，不碰真正的 store。
+
 ## 進階混合（core/blend-range.ts）
 
 混合範圍在合成時判斷，不在圖層自己的算繪裡：它要看的是**下面已經疊好**
@@ -626,5 +712,26 @@ interface Tool {
 
 ## 測試
 
-`tests/suite.ts` 是在瀏覽器執行的測試（影像運算需要真正的 Canvas）。
-新增功能時請一併補上對應測試，並確認 <http://localhost:5180/tests/index.html> 全數通過。
+測試在瀏覽器裡執行（影像運算需要真正的 Canvas），目前 395 項。檔案分工：
+
+- `tests/harness.ts`：共用的測試基礎設施。`group()` / `test()` 註冊案例，`assert()`、`near()`、
+  `pixel()`、`filled()` 是共用的斷言與取樣工具，`render()` 把結果寫進 `tests/index.html` 的
+  `#out` 與 `#summary`（通過顯示 ✓，失敗顯示 `.fail` 與原因；摘要含「全部通過」或「N 項失敗」）。
+- `tests/suite.ts`：核心影像運算的主套件，也是入口：它 import 其他測試檔並依序呼叫，最後 `render()`。
+  新增測試檔時在這裡加一行呼叫。
+- `tests/launch.test.ts`：上線保障，驗證錯誤攔截的去抖與文件尺寸上限（見「錯誤攔截與大圖護欄」）。
+- `tests/autosave.test.ts`：自動儲存的排程規則與 IndexedDB 讀寫（見「自動儲存」）。
+- `tests/run-headless.cjs`：`npm test` 的進入點，給 CI 用。它是 Electron 主程序（CommonJS，因為套件是
+  `"type": "module"`）：在同一個程序裡起 Vite（port 5181，`strictPort`），用隱藏視窗載入
+  `tests/index.html`，每 500 ms 讀一次 `#summary` 直到出現「全部通過」或「項失敗」，再把每個 `.fail`
+  印成 `FAIL 名稱 || 原因`。退出碼 0 全過、1 有失敗、2 套件沒跑完（逾時 5 分鐘、Vite 載入失敗、
+  渲染程序崩潰，會附上渲染程序的 console 錯誤）。視窗用記憶體內的 session partition，
+  localStorage 不會跨次執行殘留。
+
+跑法：
+
+- `npm test`：無頭執行，不用開瀏覽器。Linux 上要 `ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a npm test`
+  （原因見 `.github/workflows/ci.yml` 的註解）。
+- `npm run dev` 後開 <http://localhost:5180/tests/index.html>：在瀏覽器裡看結果頁，除錯時比較方便。
+
+新增功能時請一併補上對應測試，並確認兩種跑法都全數通過。
