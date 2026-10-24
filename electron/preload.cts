@@ -48,6 +48,13 @@ const api = {
     ipcRenderer.on('photograp:before-quit', () => fn());
   },
   quitDecision: (ok: boolean): void => { ipcRenderer.send('photograp:quit-decision', ok); },
+
+  /** Manual "check for updates"; the main process owns the updater. */
+  checkForUpdates: (): Promise<{
+    status: 'available' | 'none' | 'downloaded' | 'error' | 'unsupported';
+    version?: string;
+    message?: string;
+  }> => ipcRenderer.invoke('photograp:check-update'),
 };
 
 contextBridge.exposeInMainWorld('photograp', api);

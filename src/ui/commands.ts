@@ -35,6 +35,7 @@ import {
 import { adjustmentDialog, filterDialog, repeatLastFilter, applyAdjustmentNow } from './dialogs/pixel-op';
 import { cmd, type Cmd as CmdType } from './command-types';
 import { VECTOR_COMMANDS } from './commands-vector';
+import { checkUpdatesCommand } from './commands-update';
 
 export type { Cmd } from './command-types';
 
@@ -826,6 +827,7 @@ export const COMMANDS: CmdType[] = [
   // ---- help ----
   cmd('help.about', '關於 Photograp', () => aboutDialog()),
   cmd('help.shortcuts', '鍵盤快速鍵…', () => shortcutsDialog(), { shortcut: 'F1' }),
+  checkUpdatesCommand,
 ];
 
 // Adjustment commands (destructive + adjustment layer variants).

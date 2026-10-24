@@ -718,7 +718,7 @@ export async function layerStyleDialog(app: App): Promise<void> {
 export async function aboutDialog(): Promise<void> {
   const body = el('div', { style: 'max-width:460px;display:grid;gap:8px' },
     el('div', { style: 'font-size:18px;font-weight:700;color:var(--text-bright)', text: 'Photograp' }),
-    el('div', { class: 'hint', text: '版本 1.0.0 · MIT 授權的開源影像編輯器' }),
+    el('div', { class: 'hint', text: `版本 ${__APP_VERSION__} · MIT 授權的開源影像編輯器` }),
     el('p', {
       text: '以 TypeScript 與 HTML5 Canvas 實作的圖層式影像編輯器，'
         + '支援圖層、遮色片、選取範圍、混合模式、非破壞性調整圖層與濾鏡。'

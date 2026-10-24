@@ -1,6 +1,6 @@
 {
   "name": "photograp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": false,
   "license": "MIT",
   "author": "Photograp Contributors",
@@ -20,6 +20,9 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
     "test": "electron tests/run-headless.cjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
   },
   "devDependencies": {
     "electron": "^44.9.3",
@@ -68,6 +71,7 @@
       ]
     },
     "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
@@ -89,6 +93,13 @@
       "target": [
         "AppImage"
       ]
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "sensa-code",
+        "repo": "photograp"
+      }
+    ]
   }
 }

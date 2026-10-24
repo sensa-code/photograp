@@ -7,7 +7,7 @@
 > blend modes, non-destructive adjustment layers, filters and undo history.
 > Everything runs locally in the browser — no upload, no server, no account.
 
-![CI](https://github.com/sensa-code/photograp/actions/workflows/ci.yml/badge.svg) ![授權](https://img.shields.io/badge/license-MIT-blue) ![技術](https://img.shields.io/badge/TypeScript-5.6-3178c6) ![相依](https://img.shields.io/badge/runtime%20deps-0-success)
+![CI](https://github.com/sensa-code/photograp/actions/workflows/ci.yml/badge.svg) ![授權](https://img.shields.io/badge/license-MIT-blue) ![技術](https://img.shields.io/badge/TypeScript-5.6-3178c6) ![相依](https://img.shields.io/badge/web%20runtime%20deps-0-success)
 
 ---
 
@@ -100,6 +100,8 @@ Linux 的 AppImage 必須在 Linux 上建置（Windows 兩種目標都已設定�
 - **標題列**顯示目前文件名稱，有未儲存變更時加上圓點
 - **關閉前確認**：還有沒存的文件時會用原生對話框問一次
 - **記住視窗大小與位置**，下次開啟回到原處
+- **自動更新**（安裝版）：啟動後在背景向 GitHub Releases 檢查新版本並下載，下載完成會問要不要立即重新啟動安裝；
+  也可以用**說明 › 檢查更新…**手動檢查。免安裝版不會自動更新，新版請到 Releases 頁下載
 
 瀏覽器版完全不受影響：沒有橋接時每個呼叫都會回報「不支援」，自動走原本的
 網頁路徑（`<input type="file">` 與下載）。
@@ -448,7 +450,9 @@ docs/         架構說明
 ## 技術說明
 
 - TypeScript 5，`strict` 模式；打包工具 Vite
-- **執行期零相依套件**：所有影像運算皆自行實作，只用 HTML5 Canvas 2D 與型別化陣列
+- **網頁版執行期零相依套件**：所有影像運算皆自行實作，只用 HTML5 Canvas 2D 與型別化陣列；
+  桌面版的主行程另外用 [electron-updater](https://www.npmjs.com/package/electron-updater) 做自動更新，
+  它只在 Electron 主行程載入，不會進到網頁的 bundle
 - 圖層像素採用寫入時複製（copy-on-write）：步驟記錄的快照共用未變動的緩衝區，
   只有被修改的圖層才會佔用額外記憶體
 - 遮色片以「不透明灰階」儲存，合成時才轉成 alpha（結果會快取），

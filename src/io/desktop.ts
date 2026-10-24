@@ -7,6 +7,12 @@
 
 export interface DesktopFile { path: string; name: string; data: string }
 export interface SavedFile { path: string; name: string }
+/** Mirrors UpdateCheck in electron/updater.cts. */
+export interface UpdateCheck {
+  status: 'available' | 'none' | 'downloaded' | 'error' | 'unsupported';
+  version?: string;
+  message?: string;
+}
 
 interface Bridge {
   desktop: true;
@@ -26,6 +32,7 @@ interface Bridge {
   onPendingFiles(fn: () => void): void;
   onBeforeQuit(fn: () => void): void;
   quitDecision(ok: boolean): void;
+  checkForUpdates(): Promise<UpdateCheck>;
 }
 
 const bridge = (): Bridge | null =>
@@ -104,6 +111,12 @@ export async function desktopConfirmClose(message: string): Promise<boolean | nu
 
 export function desktopSetTitle(title: string): void {
   bridge()?.setTitle(title);
+}
+
+/** Manual update check; null in the browser, which is always the latest build. */
+export async function desktopCheckForUpdates(): Promise<UpdateCheck | null> {
+  const b = bridge();
+  return b ? b.checkForUpdates() : null;
 }
 
 /** A data URL back into a Blob, for files read through the bridge. */

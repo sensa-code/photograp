@@ -229,6 +229,7 @@ export const MENUS: { label: string; items: MenuEntry[] }[] = [
     label: '說明',
     items: [
       cmdEntry('help.shortcuts'),
+      cmdEntry('help.checkUpdates'),
       cmdEntry('help.about'),
     ],
   },
