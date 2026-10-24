@@ -7,7 +7,7 @@
 > blend modes, non-destructive adjustment layers, filters and undo history.
 > Everything runs locally in the browser — no upload, no server, no account.
 
-![授權](https://img.shields.io/badge/license-MIT-blue) ![技術](https://img.shields.io/badge/TypeScript-5.6-3178c6) ![相依](https://img.shields.io/badge/runtime%20deps-0-success)
+![CI](https://github.com/sensa-code/photograp/actions/workflows/ci.yml/badge.svg) ![授權](https://img.shields.io/badge/license-MIT-blue) ![技術](https://img.shields.io/badge/TypeScript-5.6-3178c6) ![相依](https://img.shields.io/badge/runtime%20deps-0-success)
 
 ---
 
