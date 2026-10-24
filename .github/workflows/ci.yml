@@ -1,0 +1,28 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  ci:
+    uses: sensa-code/ci-shared/.github/workflows/node-quality.yml@v1
+    with:
+      runner: ${{ vars.CI_RUNNER || '"ubuntu-latest"' }}
+      node-version: '24'
+      typecheck: npm run typecheck
+      # npm test 用 devDependency 的 Electron 開隱藏視窗跑 tests/index.html（見 tests/run-headless.cjs）。
+      # Electron 44.9.3 的 npm 套件沒有 postinstall，npm ci 之後 node_modules/electron/dist/ 裡沒有執行檔；
+      # 第一次執行 electron 時它的 index.js 會自己下載（log 多一行「Downloading Electron binary...」），
+      # 不必另外跑 install.js。在 Windows 上 npm test 一行就能跑；在 Linux runner 上還要兩件事：
+      # 1. runner 沒有顯示器，用 xvfb-run 開一個虛擬 X server 給 Electron。
+      # 2. ubuntu-24.04 映像限制非特權的 user namespace，Chromium 的 SUID sandbox 起不來會直接中止
+      #    （「The SUID sandbox helper binary was found, but is not configured correctly」）。
+      #    zygote 在主程式的 JS 執行之前就 fork 了，所以 --no-sandbox 不能在 run-headless.cjs 裡
+      #    用 app.commandLine 加，要用 Electron 認得的環境變數 ELECTRON_DISABLE_SANDBOX 從外面帶進去。
+      test: ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a npm test
+      build: npm run build
