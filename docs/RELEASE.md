@@ -72,12 +72,14 @@ macOS 的 `.dmg` 要在 macOS 上建、Linux 的 AppImage 要在 Linux 上建（
 需要 `gh` CLI 且已登入 `sensa-code`。在 repo 根目錄：
 
 ```bash
-gh release create v1.0.0 release/*.exe --repo sensa-code/photograp --title "Photograp 1.0.0" --notes "第一個公開版本。Windows x64 安裝檔與免安裝版；沒有程式碼簽章，SmartScreen 會跳未知的發行者警告。"
+gh release create v1.0.0 "release/Photograp Setup 1.0.0.exe" "release/Photograp 1.0.0.exe" --repo sensa-code/photograp --title "Photograp 1.0.0" --notes "第一個公開版本。Windows x64 安裝檔與免安裝版；沒有程式碼簽章，SmartScreen 會跳未知的發行者警告。"
 ```
 
+- 檔名寫死本次版本，**不要用 `release/*.exe`**：`dist:win` 不會清空 `release/`，同一個工作目錄打包過舊版的話，
+  舊的 `.exe` 還在裡面，萬用字元會把新舊版本一起傳上去。打包前 `Remove-Item -Recurse release` 也可以。
 - tag 不存在時 `gh` 會從 `main` 的最新 commit 建 tag；要指定 commit 加 `--target <sha>`。
 - 要先給人試用再公開，加 `--draft`，確認後在 Release 頁按 Publish。
-- 補傳或換檔用 `gh release upload v1.0.0 release/*.exe --clobber`。
+- 補傳或換檔用 `gh release upload v1.0.0 "release/Photograp Setup 1.0.0.exe" "release/Photograp 1.0.0.exe" --clobber`。
 
 ### 沒簽章時 SmartScreen 的說明
 
@@ -126,8 +128,9 @@ README 與 Release notes 都要寫明，不然會被當成病毒。要消掉它�
 
 每一條都寫了做完之後怎麼驗證，接手時照著驗。
 
-1. **程式碼簽章**：安裝檔沒簽，SmartScreen 會擋。要買 OV 或 EV 憑證，在 `package.json` 的 `build.win`
-   設 `certificateSubjectName` 或 `signtoolOptions`，憑證與密碼走環境變數，不進 repo。
+1. **程式碼簽章**：安裝檔沒簽，SmartScreen 會擋。要買 OV 或 EV 憑證，在 `package.json` 設
+   `build.win.signtoolOptions.certificateSubjectName`（或 `certificateFile`）；目前的 electron-builder 26.18
+   只認 `signtoolOptions` 底下的欄位，直接放在 `build.win` 會在設定驗證階段被拒絕。憑證與密碼走環境變數，不進 repo。
    驗證：`signtool verify /pa "release/Photograp Setup <版本>.exe"` 通過；乾淨的 Windows 上第一次執行不跳
    「未知的發行者」（EV 憑證立即生效，OV 憑證要累積下載量 SmartScreen 才會放行）。
 2. **自動更新**：目前沒有。計畫用 `electron-updater` 搭配 GitHub Releases 當更新來源（electron-builder
