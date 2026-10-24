@@ -44,6 +44,8 @@ let downloadedVersion: string | null = null;
 /** The user chose "restart now"; the next approved close installs. */
 let installRequested = false;
 let prompting = false;
+/** A manual check is already waiting on the current download to report its failure. */
+let watchingDownload = false;
 let lastLoggedPercent = -1;
 /** Log writes run one after another so the file keeps the events in order. */
 let logQueue: Promise<void> = Promise.resolve();
@@ -148,6 +150,17 @@ export function installUpdateNow(): boolean {
 // Checking.
 // ---------------------------------------------------------------------------
 
+function reportDownloadFailure(e: unknown): void {
+  const why = e instanceof Error ? e.message : String(e);
+  const options = {
+    type: 'error' as const,
+    title: '更新下載失敗',
+    message: `新版本下載失敗：${why}\n可以稍後再用「說明 › 檢查更新…」重試，或到 ${RELEASES_URL} 下載安裝檔。`,
+  };
+  const win = getWindow();
+  void (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
+}
+
 async function check(manual: boolean): Promise<UpdateCheck> {
   const reason = unsupportedReason();
   if (reason) return { status: 'unsupported', message: reason };
@@ -160,19 +173,17 @@ async function check(manual: boolean): Promise<UpdateCheck> {
     if (!result) return { status: 'unsupported', message: `這個版本無法自動更新，新版請到 ${RELEASES_URL} 下載。` };
     // A failed download is logged by the error event. After a background
     // check that is all; after a manual one the user was told "downloading",
-    // so they are told it stopped, too.
-    result.downloadPromise?.catch((e: unknown) => {
-      if (!manual) return;
-      const why = e instanceof Error ? e.message : String(e);
-      const options = {
-        type: 'error' as const,
-        title: '更新下載失敗',
-        message: `新版本下載失敗：${why}
-可以稍後再用「說明 › 檢查更新…」重試，或到 ${RELEASES_URL} 下載安裝檔。`,
-      };
-      const win = getWindow();
-      void (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
-    });
+    // so they are told it stopped, too. Repeated checks share one download,
+    // so only the first one waits on it: one failure, one dialog.
+    if (manual && !watchingDownload && result.downloadPromise) {
+      watchingDownload = true;
+      result.downloadPromise.then(() => { watchingDownload = false; }, (e: unknown) => {
+        watchingDownload = false;
+        reportDownloadFailure(e);
+      });
+    } else {
+      result.downloadPromise?.catch(() => undefined);
+    }
     return result.isUpdateAvailable
       ? { status: 'available', version: result.updateInfo.version }
       : { status: 'none', version: app.getVersion() };
