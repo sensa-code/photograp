@@ -18,7 +18,8 @@
     "dist:dir": "npm run build:desktop && electron-builder --dir",
     "icon": "electron scripts/make-icon.cjs",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit && tsc -p electron --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
+    "test": "electron tests/run-headless.cjs"
   },
   "devDependencies": {
     "electron": "^44.9.3",

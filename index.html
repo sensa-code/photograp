@@ -3,6 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content Security Policy。網頁版與 Electron 桌面版（loadFile('dist/index.html')）共用這份
+      index.html，所以用 <meta> 宣告。基準是 default-src 'none'，每一條只放行程式真的用到的來源：
+
+      - default-src 'none'
+          沒列出的資源類型一律不載入。字型用系統字型堆疊、沒有 worker、iframe、媒體或外掛，
+          所以不需要 font-src、worker-src、frame-src、media-src、object-src。
+      - script-src 'self'
+          Vite 打包後只有一支同源的 module script，沒有 inline script，也不用 eval。
+      - style-src 'self' 'unsafe-inline'
+          樣式表是同源的一支 CSS。'unsafe-inline' 是因為 src/ui/dom.ts 的 el() 用
+          setAttribute('style', …) 設行內樣式，style 屬性受 CSP 管制（改成 .style.cssText 這種
+          CSSOM 寫法就能拿掉）；開發模式下 Vite 也是用 <style> 元素注入 CSS。
+      - img-src 'self' data: blob:
+          圖層、圖樣與 .pgraph 專案都以 data: URL 編碼影像（src/io/files.ts、src/core/patterns.ts），
+          開啟影像檔則用 URL.createObjectURL() 的 blob: URL 餵給 <img>（loadImageFile）；
+          'self' 給 favicon。
+      - connect-src 'self' data: ws://localhost:* ws://127.0.0.1:*
+          src/io/desktop.ts 的 dataUrlToBlob() 用 fetch(dataURL) 把桌面版讀進來的檔案轉成 Blob，
+          所以 data: 一定要有。兩個 ws:// 只給 Vite 開發伺服器的 HMR WebSocket（它連的是頁面
+          網址的主機名稱，所以 localhost 與 127.0.0.1 都列）；正式版沒有任何網路連線。
+      - base-uri 'none'、form-action 'none'
+          沒有 <base> 也沒有表單送出；這兩條不受 default-src 管轄，所以明寫關死。
+
+      frame-ancestors 與 report-uri 在 <meta> 裡無效，需要時由靜態主機以 HTTP 標頭補上。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: ws://localhost:* ws://127.0.0.1:*; base-uri 'none'; form-action 'none'"
+    />
+    <meta
+      name="description"
+      content="Photograp 是開源、純瀏覽器執行的圖層式影像編輯器：圖層、遮色片、選取範圍、混合模式、調整圖層與濾鏡全部在本機運算，影像不會上傳到任何伺服器。"
+    />
+    <meta name="theme-color" content="#1e1e1e" />
     <link rel="icon" type="image/svg+xml" href="./public/favicon.svg" />
     <title>Photograp</title>
   </head>

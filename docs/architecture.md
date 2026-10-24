@@ -165,6 +165,31 @@ preload 用 `contextBridge` 開出來的那幾個函式說話，而且開著 `co
 `package.json` 宣告了 `"type": "module"`，所以 Electron 那邊的原始碼副檔名是
 `.cts`，`tsc` 會輸出 `.cjs`；沙箱化的 preload 本來就必須是 CommonJS。
 
+## 頁面安全：index.html 的 Content Security Policy
+
+`index.html` 以 `<meta http-equiv="Content-Security-Policy">` 宣告 CSP，網頁版與 Electron
+桌面版（`loadFile('dist/index.html')`）共用同一份。基準是 `default-src 'none'`，只放行程式
+真的會用到的來源；每一條的理由寫在 `index.html` 的註解裡，這裡記下取捨：
+
+- **`style-src` 帶 `'unsafe-inline'`**：`ui/dom.ts` 的 `el()` 用 `setAttribute('style', …)`
+  設行內樣式，style 屬性受 CSP 管制；改成 CSSOM（`.style.cssText`）就能拿掉它。開發模式下
+  Vite 也是用 `<style>` 元素注入 CSS，所以在那之前也不能拿掉。
+- **`connect-src` 要有 `data:`**：桌面版的檔案是以 data URL 交給算繪端，`io/desktop.ts` 的
+  `dataUrlToBlob()` 用 `fetch()` 轉成 Blob；少了它桌面版開不了檔。沒有程式會 `fetch()`
+  blob: URL，所以 `blob:` 只在 `img-src`。
+- **`img-src` 要有 `data:` 與 `blob:`**：專案檔、圖樣與智慧型物件來源都是 data URL，
+  開啟影像檔則走 `URL.createObjectURL()` 餵給 `<img>`。
+- **`ws://localhost:*`、`ws://127.0.0.1:*`** 只為了 Vite 開發伺服器的 HMR WebSocket；
+  正式版沒有任何網路連線。想讓正式版連這兩條都不留，可以改成在 `vite.config.ts` 用
+  `transformIndexHtml`（`apply: 'build'`）只在打包時注入 CSP，開發頁面就不必帶它。
+- `<meta>` 版的 CSP 管不到 `frame-ancestors` 與 `report-uri`；需要防止被嵌入 iframe 時，
+  由靜態主機加 HTTP 標頭。
+
+驗證：以 `npx electron . --remote-debugging-port=9222` 啟動桌面版，透過 CDP 的
+`Log.entryAdded` 收集訊息，被擋下的資源會以「violates the following Content Security Policy」
+或「Refused to …」的訊息出現；瀏覽器裡則看 DevTools
+的 console。改了 CSP 就重跑一次開檔、存檔與轉存。
+
 ## 進階混合（core/blend-range.ts）
 
 混合範圍在合成時判斷，不在圖層自己的算繪裡：它要看的是**下面已經疊好**
