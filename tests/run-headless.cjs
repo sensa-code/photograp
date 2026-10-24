@@ -55,6 +55,8 @@ const flush = (stream) => new Promise((resolve) => stream.write('', resolve));
 
 /** Renderer console errors, reported when the suite never finishes. */
 const rendererErrors = [];
+/** The last summary line the page reported, for the timeout message. */
+let lastSummary = '';
 /** The in-process Vite dev server, once it is listening. */
 let vite = null;
 /** Set by the first call to finish(); later calls (signals, errors) join it. */
@@ -64,6 +66,7 @@ let finishing = null;
 function finish(code) {
   if (finishing) return finishing;
   finishing = (async () => {
+    clearTimeout(watchdog);
     if (code === 2 && rendererErrors.length > 0) {
       err('ERROR 渲染程序的 console 錯誤（最後 20 則）：');
       for (const message of rendererErrors.slice(-20)) err(`  ${message}`);
@@ -89,6 +92,14 @@ process.on('uncaughtException', (e) => void abort(e && e.stack ? e.stack : Strin
 process.on('unhandledRejection', (e) => void abort(e && e.stack ? e.stack : String(e)));
 // Electron would otherwise quit with code 0 when the window goes away.
 app.on('window-all-closed', () => void abort('測試視窗在套件完成前被關閉'));
+
+// One deadline for everything: Vite start-up, page load and polling. A
+// renderer stuck in a synchronous loop never answers executeJavaScript(),
+// so the deadline cannot live inside the polling loop.
+const watchdog = setTimeout(
+  () => void abort(`逾時 ${TOTAL_TIMEOUT_MS / 1000} 秒，頁面停在「${lastSummary}」`),
+  TOTAL_TIMEOUT_MS,
+);
 
 /** Starts Vite on the fixed port; rejects if the port is taken. */
 async function startVite() {
@@ -125,12 +136,10 @@ const PROBE = `(() => {
   };
 })()`;
 
-/** Polls the page until the suite has rendered a verdict, or the deadline passes. */
+/** Polls the page until the suite has rendered a verdict; the watchdog ends a run that never does. */
 async function waitForSuite(webContents) {
-  const deadline = startedAt + TOTAL_TIMEOUT_MS;
-  let lastSummary = '';
   let probeFailures = 0;
-  while (Date.now() < deadline) {
+  for (;;) {
     await delay(POLL_MS);
     let state;
     try {
@@ -145,7 +154,6 @@ async function waitForSuite(webContents) {
     lastSummary = state.summary;
     if (lastSummary.includes('全部通過') || lastSummary.includes('項失敗')) return state;
   }
-  throw new Error(`逾時 ${TOTAL_TIMEOUT_MS / 1000} 秒，頁面停在「${lastSummary}」`);
 }
 
 async function main() {
