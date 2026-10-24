@@ -143,7 +143,7 @@ export function installUpdateNow(): boolean {
   if (!failures.length) return true;
   const reason = failures[0].message;
   log('error', `installer did not start: ${reason}`);
-  dialog.showErrorBox('無法安裝更新', `更新程式沒有啟動：${reason}\n請到 ${RELEASES_URL} 下載安裝檔。`);
+  dialog.showErrorBox('無法安裝更新', `無法啟動安裝程式，可能被防毒軟體擋下。可以稍後再試，或到 ${RELEASES_URL} 手動下載安裝。`);
   return false;
 }
 

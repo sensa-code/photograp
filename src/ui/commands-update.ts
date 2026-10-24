@@ -26,7 +26,8 @@ function report(app: App, r: UpdateCheck | null): void {
       app.toast(r.message ?? '這個版本無法自動更新');
       return;
     case 'error':
-      app.toast(`檢查更新失敗：${r.message ?? '未知的錯誤'}`, 'error');
+      // The main process already wrote a full sentence (electron/update-errors.cts).
+      app.toast(r.message ?? '檢查更新失敗，請稍後再試。', 'error');
   }
 }
 
@@ -38,8 +39,9 @@ export const checkUpdatesCommand = cmd('help.checkUpdates', '檢查更新…', a
   app.toast('正在檢查更新…');
   try {
     report(app, await desktopCheckForUpdates());
-  } catch (e) {
-    app.toast(`檢查更新失敗：${e instanceof Error ? e.message : String(e)}`, 'error');
+  } catch {
+    // The IPC call itself failed; its raw error means nothing to the user.
+    app.toast('檢查更新失敗，請稍後再試。', 'error');
   } finally {
     checking = false;
   }
