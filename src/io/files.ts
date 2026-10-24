@@ -1,4 +1,5 @@
 import { PhotoDoc } from '../core/document';
+import { deleteAutosave } from '../core/autosave';
 import type { BlendIf, Layer, LayerEffects, SmartFilterEntry } from '../core/types';
 import { normalizeBlendIf } from '../core/blend-range';
 import { createSurface, type Surface } from '../core/surface';
@@ -310,11 +311,13 @@ export async function saveProject(doc: PhotoDoc, saveAs = false): Promise<boolea
     doc.meta.filePath = saved.path;
     doc.meta.name = saved.name;
     doc.savedRevision = doc.revision;
+    void deleteAutosave(doc.meta.id);
     return true;
   }
   const blob = new Blob([json], { type: 'application/json' });
   downloadBlob(blob, `${base}${PROJECT_EXT}`);
   doc.savedRevision = doc.revision;
+  void deleteAutosave(doc.meta.id);
   return true;
 }
 

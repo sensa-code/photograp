@@ -1,4 +1,5 @@
 import { Emitter } from './emitter';
+import { deleteAutosave } from './autosave';
 import { PhotoDoc } from './document';
 import type { RGB } from './color';
 import { defaultSnapSettings, type SnapLines, type SnapSettings } from './guides';
@@ -74,6 +75,7 @@ export class App {
     if (i < 0) return;
     this.docs.splice(i, 1);
     this.views.delete(id);
+    void deleteAutosave(id);
     if (this.activeDocId === id) {
       this.activeDocId = this.docs[Math.min(i, this.docs.length - 1)]?.meta.id ?? null;
     }
