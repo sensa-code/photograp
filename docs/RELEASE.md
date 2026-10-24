@@ -37,7 +37,7 @@ git revert <壞掉的 merge commit> -m 1
 ## 桌面版（Electron，GitHub Releases）
 
 - 下載頁：<https://github.com/sensa-code/photograp/releases>
-- 版本號只有一個來源：`package.json` 的 `version`（目前 `1.1.0`）。electron-builder 用它命名產出
+- 版本號只有一個來源：`package.json` 的 `version`（目前 `1.1.2`）。electron-builder 用它命名產出
   （例如 `Photograp-Setup-1.1.0.exe`、`Photograp 1.1.0.exe`），Release 的 tag 也照它取 `vX.Y.Z`；
   「說明 › 關於 Photograp」顯示的版本由 `vite.config.ts` 的 `define` 在建置時注入（`__APP_VERSION__`），不用另外改。
   出新版只改這個欄位，合併進 `main`，再從 `main` 打包。
@@ -146,6 +146,67 @@ README 與 Release notes 都要寫明，不然會被當成病毒。要消掉它�
 5. 自動更新：裝著上一版（1.1.0 以後）的電腦開啟程式，約 10 秒後應該跳出「已下載完成」的對話框；
    沒跳就看 `%APPDATA%\Photograp\logs\updater.log`。
 
+### 怎麼在工作站上驗證安裝與更新
+
+用命令列安裝、移除，不必點安裝精靈。以下在 repo 根目錄的 PowerShell 執行，`X.Y.Z` 換成要驗的版本。
+
+- 靜默安裝（使用者層級，裝到 `%LOCALAPPDATA%\Programs\Photograp`）：
+
+  ```powershell
+  .\release\Photograp-Setup-X.Y.Z.exe /S
+  ```
+
+- 靜默移除（cmd 的寫法是 `"%LOCALAPPDATA%\Programs\Photograp\Uninstall Photograp.exe" /S /currentuser`）：
+
+  ```powershell
+  & "$env:LOCALAPPDATA\Programs\Photograp\Uninstall Photograp.exe" /S /currentuser
+  ```
+
+- 更新日誌在 `%APPDATA%\Photograp\logs\updater.log`，看最後幾行：
+
+  ```powershell
+  Get-Content "$env:APPDATA\Photograp\logs\updater.log" -Tail 30
+  ```
+
+- **在有 Claude 桌面版的工作站上，啟動程式與看日誌都要用 PowerShell**：Claude 桌面版是 MSIX 套件，
+  從 Claude 的 Bash 啟動的程式寫進 AppData 的新檔案，會被轉到 Claude 的私有資料夾
+  （`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache`），只有 Claude 裡看得到。
+  用 Bash 啟動、再用一般視窗看日誌（或反過來），會看到兩份內容不同的 `updater.log`，以為更新沒跑。
+  Claude 的 PowerShell 工具用的 PowerShell 7 不會被轉向。
+- 剛發布的版本：發布後約兩分鐘內 GitHub 的 CDN 可能還回舊的 `latest.yml`，這段時間檢查更新會說已是最新，等幾分鐘再試。
+
+**實測紀錄（2026-10-24，K95）**：安裝 1.1.0 後啟動，約 10 秒後找到 1.1.1；差異下載只抓了 927 KB
+（完整安裝檔 118 MB）；跳出原生對話框「Photograp 1.1.1 已下載完成，重新啟動後安裝。」，按「立即重新啟動」後
+12 秒內換成 1.1.1，約 19 秒後程式自己以 `--updated` 重新開啟；重開 10 秒後的背景檢查回報 1.1.1 已是最新。
+接著用上面的指令移除，程式、捷徑與安裝資料夾都清乾淨，但 `.pgraph` 的關聯機碼留著（見下面「移除」，1.1.2 修正）。
+
+### 移除
+
+從 Windows 的「設定 › 應用程式」移除，或用上面的靜默移除指令。移除程式會刪掉安裝資料夾、桌面與開始功能表捷徑；
+使用者資料夾 `%APPDATA%\Photograp`（例如更新日誌）不會刪。
+
+- **`.pgraph` 關聯（1.1.2 起）**：移除程式會刪掉 `HKEY_CURRENT_USER\Software\Classes\.pgraph` 與 ProgID
+  `HKEY_CURRENT_USER\Software\Classes\Photograp Project`，並通知檔案總管關聯已變（`build/installer.nsh`
+  的 `customUnInstall`）。安裝時在安裝模式頁選了所有使用者的話，這兩個機碼在 `HKEY_LOCAL_MACHINE\Software\Classes`，
+  移除程式會跟著安裝模式清對的位置。兩個例外：
+  - `.pgraph` 的預設值不是 `Photograp Project` 時（裝了 Photograp 之後有別的程式把 `.pgraph` 登記成自己的），
+    只刪 Photograp 自己的 ProgID，不動 `.pgraph`，免得把別的程式的關聯一起刪掉。
+  - 自動更新時跳過：electron-updater 會帶 `--updated` 執行舊版的移除程式，再由新版安裝程式重新登記關聯，
+    這時清掉會在更新途中短暫拿掉關聯。
+- **1.1.1 以前的版本移除後的殘留**：electron-builder 內建的移除邏輯只刪 ProgID 與 `OpenWithProgids` 裡的值，
+  `.pgraph` 機碼本身（預設值 `Photograp Project`，底下一個空的 `OpenWithProgids`）會留著，雙擊 `.pgraph`
+  會指向不存在的程式。先看預設值：
+
+  ```powershell
+  reg query "HKCU\Software\Classes\.pgraph" /ve
+  ```
+
+  **只有顯示的值是 `Photograp Project` 時**才刪；是別的值代表已經有其他程式登記了 `.pgraph`，不要刪：
+
+  ```powershell
+  reg delete "HKCU\Software\Classes\.pgraph" /f
+  ```
+
 ### 怎麼回滾
 
 - Release 本身：壞掉的版本在 Release 頁改成 Pre-release 或 `gh release delete vX.Y.Z --cleanup-tag`
@@ -183,12 +244,12 @@ README 與 Release notes 都要寫明，不然會被當成病毒。要消掉它�
    只認 `signtoolOptions` 底下的欄位，直接放在 `build.win` 會在設定驗證階段被拒絕。憑證與密碼走環境變數，不進 repo。
    驗證：`signtool verify /pa "release/Photograp Setup <版本>.exe"` 通過；乾淨的 Windows 上第一次執行不跳
    「未知的發行者」（EV 憑證立即生效，OV 憑證要累積下載量 SmartScreen 才會放行）。
-2. **自動更新的安裝那一步還沒實機驗過**：檢查、下載、sha512 驗證與提示對話框已經用本機的 generic 來源驗過
-   （`PHOTOGRAP_UPDATE_URL`，做法見加入自動更新的那支 PR），但按「立即重新啟動」後實際執行安裝檔、
-   靜默安裝到原目錄、再重新開啟程式，還沒有在任何一台機器上跑過。
-   驗證：在乾淨的 Windows 帳號裝 1.1.0，發一個 1.1.1 的正式 Release（draft 與 pre-release 不會被檢查到），
-   開啟 1.1.0、開一個未存的文件，等提示後按「立即重新啟動」：先問未存變更，取消時不安裝、視窗留著；
-   再按一次並確認後，程式關閉、安裝完自動重開，「關於」顯示 1.1.1，安裝目錄與捷徑都沒變。
+2. **自動更新的安裝那一步：已實機驗證（2026-10-24，K95）**。從 1.1.0 自動更新到正式 Release 1.1.1：
+   約 10 秒後找到新版、差異下載 927 KB（完整 118 MB）、對話框按「立即重新啟動」後 12 秒內換成 1.1.1、
+   約 19 秒後以 `--updated` 自己重開、重開 10 秒後的檢查回報已是最新。紀錄與指令見上面「怎麼在工作站上驗證安裝與更新」。
+   這次沒走到的只剩一條路徑：開著未存的文件時按「立即重新啟動」，應該先問未存變更，取消時不安裝、視窗留著。
+   驗證：裝著上一版時開一個未存的文件，等提示後按「立即重新啟動」並在未存確認時取消，確認視窗留著、版本沒變；
+   再按一次並確認後照常更新。
 3. **逐像素路徑搬到 Worker**：混合模式裡 Canvas 不原生支援的那幾種、濾鏡與內容感知運算都在主執行緒跑，
    大圖會卡住 UI（自動儲存放慢的機制也是在補這個洞）。計畫把 `filters/` 的純函式與 `core/blend.ts`
    的逐像素分支搬到 Web Worker，用 `ImageData` 的 buffer 做 transfer。
