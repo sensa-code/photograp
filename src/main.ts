@@ -4,6 +4,9 @@ import { PhotoDoc } from './core/document';
 import { AppUI } from './ui/app-ui';
 import { installDesktop } from './ui/desktop-integration';
 import { installErrorGuard } from './ui/error-guard';
+import { installAutosave } from './core/autosave';
+import { serializeDocument } from './io/files';
+import { offerRecovery } from './ui/dialogs/recovery';
 
 const mount = document.getElementById('app');
 if (!mount) throw new Error('找不到 #app 容器');
@@ -21,6 +24,8 @@ app.status('就緒 · 按 F1 或「說明 → 鍵盤快速鍵」查看操作說�
 // Native dialogs, the window title and files handed over by the OS. Does
 // nothing in the browser build.
 installDesktop(app);
+installAutosave(app, { serialize: serializeDocument });
+void offerRecovery(app);
 
 // A small handle for debugging and automated checks from the console. It is
 // deliberately not `photograp`: that name belongs to the desktop bridge the
