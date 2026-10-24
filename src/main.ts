@@ -3,12 +3,14 @@ import { app } from './core/app';
 import { PhotoDoc } from './core/document';
 import { AppUI } from './ui/app-ui';
 import { installDesktop } from './ui/desktop-integration';
+import { installErrorGuard } from './ui/error-guard';
 
 const mount = document.getElementById('app');
 if (!mount) throw new Error('找不到 #app 容器');
 
 const ui = new AppUI(app);
 mount.append(ui.root);
+installErrorGuard(app);
 
 // Start with an empty canvas so the workspace is usable immediately.
 app.addDoc(PhotoDoc.createBlank('未命名-1', 1280, 800, 'white'));
