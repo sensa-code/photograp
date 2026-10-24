@@ -185,23 +185,34 @@ README 與 Release notes 都要寫明，不然會被當成病毒。要消掉它�
 從 Windows 的「設定 › 應用程式」移除，或用上面的靜默移除指令。移除程式會刪掉安裝資料夾、桌面與開始功能表捷徑；
 使用者資料夾 `%APPDATA%\Photograp`（例如更新日誌）不會刪。
 
-- **`.pgraph` 關聯（1.1.2 起）**：移除程式會刪掉 `HKEY_CURRENT_USER\Software\Classes\.pgraph` 與 ProgID
-  `HKEY_CURRENT_USER\Software\Classes\Photograp Project`，並通知檔案總管關聯已變（`build/installer.nsh`
-  的 `customUnInstall`）。安裝時在安裝模式頁選了所有使用者的話，這兩個機碼在 `HKEY_LOCAL_MACHINE\Software\Classes`，
-  移除程式會跟著安裝模式清對的位置。兩個例外：
-  - `.pgraph` 的預設值不是 `Photograp Project` 時（裝了 Photograp 之後有別的程式把 `.pgraph` 登記成自己的），
-    只刪 Photograp 自己的 ProgID，不動 `.pgraph`，免得把別的程式的關聯一起刪掉。
-  - 自動更新時跳過：electron-updater 會帶 `--updated` 執行舊版的移除程式，再由新版安裝程式重新登記關聯，
-    這時清掉會在更新途中短暫拿掉關聯。
+- **`.pgraph` 關聯（1.1.2 起）**：移除程式（`build/installer.nsh` 的 `customUnInstall`）在
+  `HKEY_CURRENT_USER\Software\Classes` 底下做這幾件事，再通知檔案總管關聯已變；安裝時在安裝模式頁選了所有使用者的話，
+  改在 `HKEY_LOCAL_MACHINE\Software\Classes`，移除程式會跟著安裝模式清對的位置：
+  1. `.pgraph` 的預設值是 `Photograp Project` 才刪這個預設值。不是的話代表裝了 Photograp 之後有別的程式把 `.pgraph`
+     登記成自己的，不動。
+  2. 刪 `.pgraph\OpenWithProgids` 裡 `Photograp Project` 這個值。
+  3. `.pgraph\OpenWithProgids` 與 `.pgraph` 這兩個機碼**真的空了**（沒有子機碼、也沒有任何值）才刪。
+     不整個刪 `.pgraph`，是因為別的程式可能在底下登記了自己的 `OpenWithProgids` 值、`ShellEx` 子機碼或其他值。
+  4. 刪 ProgID 機碼 `Photograp Project`（這是 Photograp 自己的）。
+
+  自動更新時整段跳過：electron-updater 會帶 `--updated` 執行舊版的移除程式，再由新版安裝程式重新登記關聯，
+  這時清掉會在更新途中短暫拿掉關聯。
 - **1.1.1 以前的版本移除後的殘留**：electron-builder 內建的移除邏輯只刪 ProgID 與 `OpenWithProgids` 裡的值，
   `.pgraph` 機碼本身（預設值 `Photograp Project`，底下一個空的 `OpenWithProgids`）會留著，雙擊 `.pgraph`
-  會指向不存在的程式。先看預設值：
+  會指向不存在的程式。手動清的做法跟 1.1.2 的移除程式一樣保守，先列出底下所有內容：
 
   ```powershell
-  reg query "HKCU\Software\Classes\.pgraph" /ve
+  reg query "HKCU\Software\Classes\.pgraph" /s
   ```
 
-  **只有顯示的值是 `Photograp Project` 時**才刪；是別的值代表已經有其他程式登記了 `.pgraph`，不要刪：
+  **只有 `(預設值)` 是 `Photograp Project` 時**才刪這個預設值；是別的值代表已經有其他程式登記了 `.pgraph`，整段都不要做：
+
+  ```powershell
+  reg delete "HKCU\Software\Classes\.pgraph" /ve /f
+  ```
+
+  刪完再跑一次上面的 `reg query ... /s`。**除了 `.pgraph` 與底下的 `OpenWithProgids` 兩個空機碼以外，沒有任何別的值或子機碼時**，
+  才把空機碼刪掉；看到別的東西就停在這裡（預設值已經刪了，雙擊 `.pgraph` 不會再指向不存在的程式）：
 
   ```powershell
   reg delete "HKCU\Software\Classes\.pgraph" /f
