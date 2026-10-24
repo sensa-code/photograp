@@ -158,9 +158,21 @@ async function check(manual: boolean): Promise<UpdateCheck> {
   try {
     const result = await autoUpdater.checkForUpdates();
     if (!result) return { status: 'unsupported', message: `這個版本無法自動更新，新版請到 ${RELEASES_URL} 下載。` };
-    // The download failing is reported through the error event and logged
-    // there; this only stops it from becoming an unhandled rejection.
-    result.downloadPromise?.catch(() => undefined);
+    // A failed download is logged by the error event. After a background
+    // check that is all; after a manual one the user was told "downloading",
+    // so they are told it stopped, too.
+    result.downloadPromise?.catch((e: unknown) => {
+      if (!manual) return;
+      const why = e instanceof Error ? e.message : String(e);
+      const options = {
+        type: 'error' as const,
+        title: '更新下載失敗',
+        message: `新版本下載失敗：${why}
+可以稍後再用「說明 › 檢查更新…」重試，或到 ${RELEASES_URL} 下載安裝檔。`,
+      };
+      const win = getWindow();
+      void (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
+    });
     return result.isUpdateAvailable
       ? { status: 'available', version: result.updateInfo.version }
       : { status: 'none', version: app.getVersion() };
