@@ -11,6 +11,10 @@
 
 ---
 
+## 線上版本
+
+不用安裝，直接開 <https://sensa-code.github.io/photograp/> 就能用；每次合併到 `main`，GitHub Actions 會自動重新建置並部署這個網址。
+
 ## 快速開始
 
 ```bash
@@ -36,6 +40,9 @@ npm run dist:win      # 打包成 Windows 安裝檔與免安裝版（輸出在 r
 
 `npm run dist` 會依目前作業系統打包；macOS 的 .dmg 必須在 macOS 上建置，
 Linux 的 AppImage 必須在 Linux 上建置（Windows 兩種目標都已設定好）。
+
+安裝檔目前**沒有程式碼簽章**，Windows SmartScreen 第一次執行會跳「未知的發行者」警告，
+按「其他資訊 → 仍要執行」即可。
 
 > 打包前先停掉開發伺服器。Windows 不允許改名有開啟控制代碼的目錄，
 > 而 Vite 的檔案監看器會看著整個專案目錄，包含 `release/`。
