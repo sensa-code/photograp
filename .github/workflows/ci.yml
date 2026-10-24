@@ -9,12 +9,22 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  ci:
-    uses: sensa-code/ci-shared/.github/workflows/node-quality.yml@v1
-    with:
-      runner: ${{ vars.CI_RUNNER || '"ubuntu-latest"' }}
-      node-version: '24'
-      typecheck: npm run typecheck
+  quality:
+    # 檢查名稱固定是「ci / quality」：main 的必要檢查用這個名稱登記，改了會讓 PR 永遠等不到綠燈。
+    name: ci / quality
+    # 這個 repo 2026-10 改成公開之後，不能再呼叫工作室共用模板 sensa-code/ci-shared 的
+    # node-quality.yml@v1：公開 repo 呼叫不到私有 repo 的 reusable workflow（GitHub 的限制），
+    # 所以把同樣的步驟（typecheck → test → build）展開寫在這裡。
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
       # npm test 用 devDependency 的 Electron 開隱藏視窗跑 tests/index.html（見 tests/run-headless.cjs）。
       # Electron 44.9.3 的 npm 套件沒有 postinstall，npm ci 之後 node_modules/electron/dist/ 裡沒有執行檔；
       # 第一次執行 electron 時它的 index.js 會自己下載（log 多一行「Downloading Electron binary...」），
@@ -24,5 +34,5 @@ jobs:
       #    （「The SUID sandbox helper binary was found, but is not configured correctly」）。
       #    zygote 在主程式的 JS 執行之前就 fork 了，所以 --no-sandbox 不能在 run-headless.cjs 裡
       #    用 app.commandLine 加，要用 Electron 認得的環境變數 ELECTRON_DISABLE_SANDBOX 從外面帶進去。
-      test: ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a npm test
-      build: npm run build
+      - run: ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a npm test
+      - run: npm run build

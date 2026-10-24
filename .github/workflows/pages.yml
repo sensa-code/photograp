@@ -1,0 +1,41 @@
+name: Pages
+# 把 vite build 的 dist/ 部署到 GitHub Pages（https://sensa-code.github.io/photograp/）。
+# Pages 的來源已在 repo 設定選成 GitHub Actions；vite.config.ts 的 base: './' 讓 dist/
+# 放在 /photograp/ 子路徑下也能直接用。只部署 dist/，tests/ 的測試頁不在裡面。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
