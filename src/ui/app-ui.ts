@@ -1,6 +1,7 @@
 import type { App } from '../core/app';
 import { PhotoDoc } from '../core/document';
 import { createRasterLayer } from '../core/layer';
+import { fitImageToLimit } from '../core/limits';
 import { createSurface } from '../core/surface';
 import { loadImageFile, loadProject } from '../io/files';
 import { setTextEditorHook } from '../tools/draw';
@@ -227,8 +228,10 @@ export class AppUI {
             doc.commit('置入影像');
             this.app.changed();
           } else {
+            const size = fitImageToLimit(img);
+            if (size.notice) this.app.toast(size.notice);
             this.app.addDoc(PhotoDoc.fromImage(
-              file.name.replace(/\.[^.]+$/, ''), img, img.naturalWidth, img.naturalHeight,
+              file.name.replace(/\.[^.]+$/, ''), img, size.w, size.h,
             ));
             this.view.fitToWindow();
           }

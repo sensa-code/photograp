@@ -6,6 +6,7 @@ import {
   findParent, flattenLayers, layerKindLabel,
 } from '../core/layer';
 import { layerBounds } from '../core/guides';
+import { fitImageToLimit } from '../core/limits';
 import {
   createPattern, loadPatterns, savePatterns, MAX_PATTERN,
 } from '../core/patterns';
@@ -556,9 +557,9 @@ export async function openPicked(
         doc.commit('置入影像');
         app.changed();
       } else {
-        app.addDoc(PhotoDoc.fromImage(
-          file.name.replace(/\.[^.]+$/, ''), img, img.naturalWidth, img.naturalHeight,
-        ));
+        const size = fitImageToLimit(img);
+        if (size.notice) app.toast(size.notice);
+        app.addDoc(PhotoDoc.fromImage(file.name.replace(/\.[^.]+$/, ''), img, size.w, size.h));
       }
     } catch (err) {
       app.toast(err instanceof Error ? err.message : '無法開啟檔案', 'error');

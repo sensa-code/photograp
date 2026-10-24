@@ -2,7 +2,7 @@ import type { App } from '../../core/app';
 import { PhotoDoc } from '../../core/document';
 import { createSurface } from '../../core/surface';
 import { rgbCss, type RGB } from '../../core/color';
-import { clamp } from '../../core/geometry';
+import { checkDocumentSize, MAX_SIDE } from '../../core/limits';
 import { exportDocument, type ExportFormat } from '../../io/files';
 import {
   loadPatterns, patternSurface, tileInto, warmEmbedded,
@@ -39,8 +39,8 @@ export async function newDocumentDialog(app: App): Promise<void> {
   const nameInput = el('input', { type: 'text', value: name }) as HTMLInputElement;
   on(nameInput, 'input', () => { name = nameInput.value; });
 
-  const wInput = numberControl(width, 1, 12000, 1, (v) => { width = Math.round(v); });
-  const hInput = numberControl(height, 1, 12000, 1, (v) => { height = Math.round(v); });
+  const wInput = numberControl(width, 1, MAX_SIDE, 1, (v) => { width = Math.round(v); });
+  const hInput = numberControl(height, 1, MAX_SIDE, 1, (v) => { height = Math.round(v); });
   const dpiInput = numberControl(dpi, 1, 2400, 1, (v) => { dpi = Math.round(v); });
 
   const preset = selectControl('custom', [
@@ -71,10 +71,12 @@ export async function newDocumentDialog(app: App): Promise<void> {
   ]);
 
   if (await openModal({ title: '新增文件', body }) !== 'ok') return;
+  const limit = checkDocumentSize(width, height);
+  if (!limit.ok) { app.toast(limit.reason, 'error'); return; }
   // Widened because the value is only ever set from inside a callback.
   const chosenFill: string = fill;
   const doc = PhotoDoc.createBlank(
-    name || '未命名', clamp(width, 1, 12000), clamp(height, 1, 12000),
+    name || '未命名', width, height,
     chosenFill === 'custom' ? rgbCss(custom) : chosenFill,
   );
   doc.meta.dpi = dpi;
@@ -89,11 +91,11 @@ export async function imageSizeDialog(app: App): Promise<void> {
   let smooth = true;
   const ratio = doc.width / doc.height;
 
-  const wIn = numberControl(w, 1, 20000, 1, (v) => {
+  const wIn = numberControl(w, 1, MAX_SIDE, 1, (v) => {
     w = Math.round(v);
     if (linked) { h = Math.max(1, Math.round(w / ratio)); hIn.value = String(h); }
   });
-  const hIn = numberControl(h, 1, 20000, 1, (v) => {
+  const hIn = numberControl(h, 1, MAX_SIDE, 1, (v) => {
     h = Math.round(v);
     if (linked) { w = Math.max(1, Math.round(h * ratio)); wIn.value = String(w); }
   });
@@ -115,7 +117,9 @@ export async function imageSizeDialog(app: App): Promise<void> {
   ]);
 
   if (await openModal({ title: '影像尺寸', body }) !== 'ok') return;
-  doc.resampleTo(clamp(w, 1, 20000), clamp(h, 1, 20000), smooth);
+  const limit = checkDocumentSize(w, h);
+  if (!limit.ok) { app.toast(limit.reason, 'error'); return; }
+  doc.resampleTo(w, h, smooth);
   doc.commit('影像尺寸');
   app.changed();
   app.events.emit('view-changed', undefined);
@@ -151,19 +155,21 @@ export async function canvasSizeDialog(app: App): Promise<void> {
 
   const body = formGrid([
     [null, el('div', { class: 'hint', text: `目前版面：${doc.width} × ${doc.height} px` })],
-    ['寬度 (px)', numberControl(w, 1, 20000, 1, (v) => { w = Math.round(v); })],
-    ['高度 (px)', numberControl(h, 1, 20000, 1, (v) => { h = Math.round(v); })],
+    ['寬度 (px)', numberControl(w, 1, MAX_SIDE, 1, (v) => { w = Math.round(v); })],
+    ['高度 (px)', numberControl(h, 1, MAX_SIDE, 1, (v) => { h = Math.round(v); })],
     ['錨點', anchorGrid],
   ]);
 
   if (await openModal({ title: '版面尺寸', body }) !== 'ok') return;
+  const limit = checkDocumentSize(w, h);
+  if (!limit.ok) { app.toast(limit.reason, 'error'); return; }
   const dx = w - doc.width, dy = h - doc.height;
   let ox = Math.round(dx / 2), oy = Math.round(dy / 2);
   if (anchor.includes('w')) ox = 0;
   if (anchor.includes('e')) ox = dx;
   if (anchor.includes('n')) oy = 0;
   if (anchor.includes('s')) oy = dy;
-  doc.resizeCanvas(clamp(w, 1, 20000), clamp(h, 1, 20000), ox, oy);
+  doc.resizeCanvas(w, h, ox, oy);
   doc.commit('版面尺寸');
   app.changed();
   app.events.emit('view-changed', undefined);

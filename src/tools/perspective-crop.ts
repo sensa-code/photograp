@@ -1,6 +1,6 @@
 import type { App } from '../core/app';
 import type { Point } from '../core/geometry';
-import { clamp } from '../core/geometry';
+import { fitWithinLimit } from '../core/limits';
 import { createSurface } from '../core/surface';
 import { createRasterLayer } from '../core/layer';
 import { quadIsUsable, suggestedSize, warpQuad } from '../core/perspective';
@@ -82,8 +82,9 @@ export class PerspectiveCropTool implements Tool {
       return;
     }
     const { w, h } = suggestedSize(this.quad);
-    const width = clamp(w, 1, 8000);
-    const height = clamp(h, 1, 8000);
+    // The long sides of a skewed shot can ask for more pixels than the
+    // document had; keep the proportions and shrink into the limits instead.
+    const { w: width, h: height } = fitWithinLimit(w, h);
 
     // The warp is a whole-image operation, so the result is one flat layer.
     const merged = doc.render();
