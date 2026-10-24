@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater';
+import { classifyUpdateError, describeUpdateError, RELEASES_URL } from './update-errors.cjs';
 
 /**
  * Automatic updates from GitHub Releases (the `build.publish` entry in
@@ -19,10 +20,10 @@ import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-update
  *   user decided to keep. Cancelling there keeps the window and the download;
  *   the next launch finds the cached download and asks again.
  * - Background failures (offline, GitHub rate limit, a release without
- *   latest.yml) are normal and only logged. A manual check reports them.
+ *   latest.yml) are normal and only logged. A manual check reports them as a
+ *   short sentence (update-errors.cts); the raw error stays in the log.
  */
 
-const RELEASES_URL = 'https://github.com/sensa-code/photograp/releases';
 const FIRST_CHECK_DELAY_MS = 10_000;
 const LOG_LIMIT_BYTES = 1024 * 1024;
 
@@ -142,7 +143,7 @@ export function installUpdateNow(): boolean {
   if (!failures.length) return true;
   const reason = failures[0].message;
   log('error', `installer did not start: ${reason}`);
-  dialog.showErrorBox('無法安裝更新', `更新程式沒有啟動：${reason}\n請到 ${RELEASES_URL} 下載安裝檔。`);
+  dialog.showErrorBox('無法安裝更新', `無法啟動安裝程式，可能被防毒軟體擋下。可以稍後再試，或到 ${RELEASES_URL} 手動下載安裝。`);
   return false;
 }
 
@@ -151,11 +152,12 @@ export function installUpdateNow(): boolean {
 // ---------------------------------------------------------------------------
 
 function reportDownloadFailure(e: unknown): void {
-  const why = e instanceof Error ? e.message : String(e);
+  // The raw error is already in the log through the error event.
+  log('warn', `download failed; shown to the user as ${classifyUpdateError(e)}`);
   const options = {
     type: 'error' as const,
     title: '更新下載失敗',
-    message: `新版本下載失敗：${why}\n可以稍後再用「說明 › 檢查更新…」重試，或到 ${RELEASES_URL} 下載安裝檔。`,
+    message: describeUpdateError(e, 'download'),
   };
   const win = getWindow();
   void (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options));
@@ -188,8 +190,10 @@ async function check(manual: boolean): Promise<UpdateCheck> {
       ? { status: 'available', version: result.updateInfo.version }
       : { status: 'none', version: app.getVersion() };
   } catch (e) {
-    // Already logged by the error event; only a manual check shows it.
-    return { status: 'error', message: e instanceof Error ? e.message : String(e) };
+    // The raw error is already logged by the error event; only a manual check
+    // shows it, and only as a short sentence.
+    if (manual) log('warn', `manual check failed; shown to the user as ${classifyUpdateError(e)}`);
+    return { status: 'error', message: describeUpdateError(e) };
   }
 }
 

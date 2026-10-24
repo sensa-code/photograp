@@ -1,6 +1,6 @@
 {
   "name": "photograp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": false,
   "license": "MIT",
   "author": "Photograp Contributors",
@@ -19,7 +19,8 @@
     "icon": "electron scripts/make-icon.cjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
-    "test": "electron tests/run-headless.cjs"
+    "test": "electron tests/run-headless.cjs",
+    "test:electron": "tsc -p electron && node tests/update-errors.check.cjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.11"

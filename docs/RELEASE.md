@@ -84,6 +84,7 @@ gh release create v1.1.0 release/Photograp-Setup-1.1.0.exe release/Photograp-Set
   舊的 `.exe` 還在裡面，萬用字元會把新舊版本一起傳上去。打包前 `Remove-Item -Recurse release` 也可以。
 - tag 不存在時 `gh` 會從 `main` 的最新 commit 建 tag；要指定 commit 加 `--target <sha>`。
 - 要先給人試用再公開，加 `--draft`，確認後在 Release 頁按 Publish。
+- 發布後約兩分鐘內，GitHub 的 CDN 可能還回報舊的最新版本；檢查更新若說讀不到最新版本資訊，等幾分鐘再試。
 - 補傳或換檔用 `gh release upload v1.1.0 release/Photograp-Setup-1.1.0.exe release/Photograp-Setup-1.1.0.exe.blockmap release/latest.yml --repo sensa-code/photograp --clobber`。
   換了安裝檔就要連 `latest.yml` 一起換：裡面的 sha512 對不上時，更新程式會拒絕安裝。
 
@@ -100,6 +101,7 @@ gh release create v1.1.0 release/Photograp-Setup-1.1.0.exe release/Photograp-Set
   - 「稍後」或在未存確認時取消：下載好的檔案留在 `%LOCALAPPDATA%\photograp-updater`，**關閉程式時不會自動安裝**
     （`autoInstallOnAppQuit = false`）；下次啟動檢查時會直接用快取的檔案再問一次。
   - 「說明 › 檢查更新…」可以手動檢查，結果用畫面上的提示顯示；已經下載好的話會再跳一次重新啟動的對話框。
+    失敗時只顯示一句中文（連不上、GitHub 限流、讀不到最新版本資訊、其他），分類在 `electron/update-errors.cts`，原始錯誤寫進 log。
 - **一定要上傳 `latest.yml`**：更新程式只看最新 Release 的 `latest.yml`，少了它就不會有任何人收到更新
   （背景檢查失敗只寫 log，不會打擾使用者）。`.blockmap` 少了只是退回完整下載，但下一版的差異下載會用到這一版的 blockmap，所以也要傳。
 - **1.0.0 不會自動更新**：那一版沒有更新程式，1.0.0 的使用者要手動下載安裝一次 1.1.0，之後的版本才會自動更新。
@@ -146,7 +148,7 @@ README 與 Release notes 都要寫明，不然會被當成病毒。要消掉它�
 
 ### 怎麼回滾
 
-- Release 本身：壞掉的版本在 Release 頁改成 Pre-release 或 `gh release delete v1.0.0 --cleanup-tag`
+- Release 本身：壞掉的版本在 Release 頁改成 Pre-release 或 `gh release delete vX.Y.Z --cleanup-tag`
   （會連 tag 一起刪）；已經下載的人不會被收回，所以要在 Release notes 或新版本裡說明。
 - 程式碼：跟網頁版一樣用 `git revert`，改版本號後重新打包、重新發。
 - 自動更新：先照上面「緊急停止更新」把壞版本的 `latest.yml` 拿掉，再發一個版本號更大的修正版

@@ -35,4 +35,6 @@ jobs:
       #    zygote 在主程式的 JS 執行之前就 fork 了，所以 --no-sandbox 不能在 run-headless.cjs 裡
       #    用 app.commandLine 加，要用 Electron 認得的環境變數 ELECTRON_DISABLE_SANDBOX 從外面帶進去。
       - run: ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a npm test
+      # 更新錯誤訊息的分類（electron/update-errors.cts）不必開 Electron：編譯 electron/ 後用 node 直接跑。
+      - run: npm run test:electron
       - run: npm run build
