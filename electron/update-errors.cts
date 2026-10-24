@@ -26,7 +26,12 @@ const NETWORK_MESSAGE =
 const RATE_LIMIT_STATUSES = new Set([403, 429]);
 const RATE_LIMIT_MESSAGE = /rate limit|too many requests|HttpError: (403|429)\b/i;
 const NOT_FOUND_CODES = new Set(['ERR_UPDATER_LATEST_VERSION_NOT_FOUND', 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND']);
-const NOT_FOUND_MESSAGE = /Cannot find latest[\w.-]*\.yml|ERR_UPDATER_(LATEST_VERSION|CHANNEL_FILE)_NOT_FOUND/;
+/**
+ * The wording of those two errors, for when they reach us wrapped again: a 404
+ * from /releases/latest (no full release yet, or only pre-releases) comes back
+ * as ERR_UPDATER_INVALID_RELEASE_FEED with the inner code gone from the text.
+ */
+const NOT_FOUND_MESSAGE = /Cannot find latest[\w.-]*\.yml|Unable to find latest version on GitHub|ERR_UPDATER_(LATEST_VERSION|CHANNEL_FILE)_NOT_FOUND/;
 
 const SENTENCES: Record<Exclude<UpdateErrorKind, 'other'>, string> = {
   offline: '連不上更新伺服器，請確認網路後再試。',
